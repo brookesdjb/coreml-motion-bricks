@@ -13,7 +13,7 @@ echo "== NVIDIA MotionBricks (pinned submodule)"
 GIT_LFS_SKIP_SMUDGE=1 git submodule update --init third_party/motionbricks
 # Only what the SOMA runtime and the conversion use: the fp16 ONNX model, the SOMA skeleton, its motion
 # clips (locomotion/idle/interaction targets) and smart primitives. Skips the G1 robot and docs media.
-git -C third_party/motionbricks lfs pull --include="motionbricks/assets/onnx/soma/mmm_v6_soma_fp16.onnx,motionbricks/assets/human/soma_base_skel_minimal_no_root.usd,assets/motions/soma/**"
+git -C third_party/motionbricks lfs pull --include="motionbricks/assets/onnx/soma/mmm_v6_soma_fp16.onnx,motionbricks/assets/human/soma_base_skel_minimal_no_root.usd,assets/motions/soma/**,tools/onnx/assets/soma_model_rig.npz"
 
 echo "== Python environment (.venv)"
 [ -d .venv ] || "$PY" -m venv .venv
