@@ -46,8 +46,4 @@ hbar("generation_time.png", "Time per generation (one character)", "Lower is bet
 hbar("ne_throughput.png", "Neural Engine throughput by batch size",
      "Characters generated per second, 8 calls queued per submission. Higher is better.",
      ["batch 1", "batch 2", "batch 4", "batch 8"], [132, 239, 352, 692], "/s")
-# build/logs/crowd_*.txt: NPCs simulated at >= 1.0x real time, 6 processes, 15 Hz
-hbar("crowd_capacity.png", "Crowd NPCs in real time (6 processes, 15 Hz)",
-     "Largest crowd measured at >= 1.0x real time. Higher is better.",
-     ["player-style settings", "calm crowd profile"], [200, 300], "NPCs")
 print("charts written to", OUT)

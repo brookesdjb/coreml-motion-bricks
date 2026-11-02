@@ -7,7 +7,7 @@ in one batch-API submission) and hands back the results. For more NPCs, split th
 
 Stress test (headless):
     python -m cmb.crowd 100 200 300 --procs 6        # 15 Hz, calm crowd profile
-    python -m cmb.crowd 50 --procs 1 --player-style
+    python -m cmb.crowd 50 --procs 1 --nvidia-settings
 
 On an M2 Pro: ~300 NPCs in real time with 6 processes and the calm profile (see README).
 """
@@ -23,7 +23,7 @@ import numpy as np
 
 from .engine import MacSOMAEngine, load_coreml, split_outputs
 from .paths import LOG_DIR, coreml_package
-from .sim import RESPONSIVE, Session, SharedAssets
+from .sim import Session, SharedAssets
 from .street import LANE_HALF_WIDTH, STREET_END, STREET_START, street_scene
 
 import warp as wp  # noqa: E402  (after cmb.engine, which sets up the import shims)
@@ -192,7 +192,7 @@ class Crowd:
             x = rng.uniform(-LANE_HALF_WIDTH, LANE_HALF_WIDTH)
             start = wp.transform(wp.vec3(x, y, 0.0), wp.quat_identity())
             engine = MacSOMAEngine(self.batcher.request, model_to_runtime=self.shared.to_runtime)
-            session = Session(shared=self.shared, engine=engine, start=start, settings=RESPONSIVE)
+            session = Session(shared=self.shared, engine=engine, start=start)  # NVIDIA's settings unless calm
             if calm:
                 apply_calm_profile(session)
             self.npcs.append(NPC(session, rng, calm=calm))
@@ -266,7 +266,7 @@ def stress(n, procs=6, hz=15.0, seconds=12.0, calm=True):
             w.join()
     wall = max(r["wall"] for r in res)
     print(f"{n:>4} NPCs, {procs} process{'es' if procs > 1 else ''}, {hz:.0f} Hz, "
-          f"{'calm' if calm else 'player-style'} profile | real-time x{seconds / wall:4.2f} | "
+          f"{'calm crowd' if calm else 'NVIDIA default'} settings | real-time x{seconds / wall:4.2f} | "
           f"{sum(r['gens'] for r in res) / seconds:4.0f} clips/s ({sum(r['gens'] for r in res) / seconds / n:.2f} "
           f"per NPC) | failed steps {sum(r['errors'] for r in res)}", flush=True)
 
@@ -277,10 +277,10 @@ def main():
     ap.add_argument("--procs", type=int, default=6)
     ap.add_argument("--hz", type=float, default=15.0)
     ap.add_argument("--seconds", type=float, default=12.0)
-    ap.add_argument("--player-style", action="store_true", help="NVIDIA/player settings instead of the calm profile")
+    ap.add_argument("--nvidia-settings", action="store_true", help="NVIDIA's default settings instead of the calm profile")
     args = ap.parse_args()
     for n in args.npcs:
-        stress(n, args.procs, args.hz, args.seconds, calm=not args.player_style)
+        stress(n, args.procs, args.hz, args.seconds, calm=not args.nvidia_settings)
 
 
 if __name__ == "__main__":

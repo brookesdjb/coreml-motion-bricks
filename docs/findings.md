@@ -79,7 +79,7 @@ generation requests to the Neural Engine together; NPCs are split over worker pr
 |---|---|
 | 1 process, batch 4 | ~45 NPCs |
 | 4 processes, batch 4 | ~185 |
-| 6 processes, batch 8 | ~200 |
+| 6 processes, batch 8, NVIDIA default settings | ~200 (200 NPCs at 1.01× real time) |
 | **6 processes, batch 8, calm profile** | **~300** (300 NPCs at 1.01× real time) |
 
 The **calm crowd profile** (`cmb.crowd.apply_calm_profile`) asks for ~40% fewer clips (0.94 vs 1.56 per NPC

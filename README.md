@@ -1,55 +1,70 @@
 # coreml-motion-bricks
 
-Run **NVIDIA MotionBricks** — real-time, AI-generated character animation — on an **Apple Silicon Mac**, with
-the network on the **Apple Neural Engine** via CoreML. No NVIDIA GPU or TensorRT needed.
+**NVIDIA MotionBricks on Apple Silicon.** A CoreML port that runs NVIDIA's real-time character animation model
+on a Mac, with the network on the **Apple Neural Engine**. No NVIDIA GPU or TensorRT needed.
 
-MotionBricks ([paper](https://research.nvidia.com/labs/gear/motionbricks/pdfs/motionbricks_siggraph_2026.pdf),
-[code](https://github.com/NVlabs/motionbricks)) generates full-body motion between recent poses and target
-poses: walking, running, crouching, style variations, and interactions such as jumping, vaulting and ducking.
-NVIDIA's release runs on TensorRT. This project converts its SOMA (human) model to CoreML, fixes what breaks on
-the way, and runs NVIDIA's own character runtime on top of it.
+[MotionBricks](https://github.com/NVlabs/motionbricks)
+([paper](https://research.nvidia.com/labs/gear/motionbricks/pdfs/motionbricks_siggraph_2026.pdf)) generates
+full-body character motion between recent poses and target poses: walking, running, strafing, crouching,
+style variations, and interactions such as jumping, ducking and sitting. NVIDIA's release runs on TensorRT.
+This port **tracks the upstream project**: NVIDIA's code is a pinned, unmodified submodule; the same model is
+converted to CoreML on your machine; and NVIDIA's own character runtime and example scripts run on top of it.
+Only the network call changes.
 
-![250 MotionBricks NPCs on a street, generated on the Neural Engine](docs/images/crowd.png)
+![One MotionBricks character in NVIDIA's gym scene, running on the Neural Engine](docs/images/course.png)
 
 ## At a glance (Apple M2 Pro, 16 GB, macOS 26)
 
+* **Feature parity**: all 14 features of NVIDIA's Scene Preview demo (locomotion modes, six styles, jumps,
+  ducking, sitting) behave the same as with NVIDIA's reference model; NVIDIA's API examples run unmodified.
 * **Accurate**: matches NVIDIA's model on 84 recorded real generations; feet stay planted.
 * **~10 ms per generation** on the Neural Engine (99% of the work there; the GPU stays free for rendering),
   vs ~27 ms with ONNX Runtime on the CPU.
-* **~690 characters/s** Neural Engine throughput with batch-8 models.
-* **~300 NPCs in real time** on a street with jump/duck obstacles; 200 with NVIDIA-style input settings.
-* **Not for player characters (yet)**: ~0.4 s from input to visible motion, clips ≥ 0.8 s.
 
-All numbers below were produced from a clean checkout with the commands shown, on one machine. Details, the
-bugs found and what didn't work: [docs/findings.md](docs/findings.md).
+All numbers below were produced from a clean checkout with the commands shown, on one machine. Bugs found on
+the way and what didn't work: [docs/findings.md](docs/findings.md).
+
+## Compatibility with MotionBricks
+
+Against the pinned upstream commit
+[`54fc563`](https://github.com/NVlabs/motionbricks/tree/54fc563aeaaf819a753d72cc9fdc6713989cdd43) (23 Oct 2026):
+
+| MotionBricks | On the Mac | How it was checked |
+|---|---|---|
+| SOMA (human) model | ✅ converted to CoreML | `tools/check_accuracy.py` vs the fp32 reference |
+| Engine API (`MotionBricksSOMAEngine`) | ✅ drop-in `cmb.engine.MacSOMAEngine` | NVIDIA's examples below |
+| `docs/examples/generate_once.py` | ✅ runs unmodified | `tools/run_upstream_example.py generate_once`: identical output on the Neural Engine and on ONNX Runtime (NVIDIA's model as published) |
+| `docs/examples/locomotion_loop.py` | ✅ runs unmodified | `tools/run_upstream_example.py locomotion_loop`: same 14 generations; path within 1 cm of ONNX Runtime after 9 s |
+| Scene Preview character runtime (locomotion modes, styles, smart primitives, auto-interact) | ✅ NVIDIA's runtime, headless | `tools/scene_preview_parity.py`: 14/14 features (below) |
+| Scene Preview viewer | ⚪ replaced by a browser demo (`demos/course.py`) | NVIDIA's viewer needs Newton/OpenGL |
+| Inbetweener, Scene Editor, Smart Primitive Editor apps | ⚪ not ported (viewer apps) | Their scene and smart-primitive files load and run |
+| Unitree G1 robot model | ❌ not converted | |
+
+### Scene Preview features
+
+The same feature driven through NVIDIA's runtime with NVIDIA's default settings, on ONNX Runtime (NVIDIA's model
+as published) and on the Neural Engine. Foot slide = toe speed while within 6 cm of the ground; lower is better.
+
+| Feature | ONNX Runtime (reference) | Neural Engine |
+|---|---|---|
+| Walk forward | ✅ 0.13 m/s | ✅ 0.11 m/s |
+| Run forward | ✅ 0.20 m/s | ✅ 0.23 m/s |
+| Strafe | ✅ 0.21 m/s | ✅ 0.20 m/s |
+| Crouch | ✅ 0.23 m/s | ✅ 0.19 m/s |
+| Style: skipping | ✅ 0.23 m/s | ✅ 0.23 m/s |
+| Style: vogue | ✅ 0.11 m/s | ✅ 0.10 m/s |
+| Style: injured torso | ✅ 0.14 m/s | ✅ 0.13 m/s |
+| Style: injured leg | ✅ 0.15 m/s | ✅ 0.14 m/s |
+| Style: zombie | ✅ 0.09 m/s | ✅ 0.10 m/s |
+| Style: combat | ✅ 0.11 m/s | ✅ 0.14 m/s |
+| Jump (low wall) | ✅ | ✅ |
+| Jump (high wall) | ✅ | ✅ |
+| Duck under bar | ✅ | ✅ |
+| Sit, then stand | ✅ | ✅ |
+
+`python tools/scene_preview_parity.py [--backend ort]`
 
 ## Evidence
-
-### Speed
-
-![Time per generation](docs/images/generation_time.png)
-
-| Backend (batch 1) | Time per generation | Where the work runs (CoreML compute plan) |
-|---|---|---|
-| ONNX Runtime, CPU | 26–27 ms | CPU |
-| CoreML, CPU + GPU | ~12 ms | GPU 89%, CPU 11% |
-| CoreML, let CoreML choose (`ALL`) | — | GPU 86%, Neural Engine 13% |
-| **CoreML, CPU + Neural Engine** | **~10 ms** | **Neural Engine 99%**, CPU 1% |
-
-`python tools/motion_quality.py`, `python tools/bench_neural_engine.py`
-
-### Throughput (for crowds)
-
-![Neural Engine throughput by batch size](docs/images/ne_throughput.png)
-
-| Model | 1 call at a time | 8 calls queued |
-|---|---|---|
-| batch 1 | 113 /s | 132 /s |
-| batch 2 | 165 /s | 239 /s |
-| batch 4 | 232 /s | 352 /s |
-| batch 8 | 321 /s | **692 /s** |
-
-Characters generated per second on the Neural Engine. `python tools/bench_neural_engine.py`
 
 ### Accuracy
 
@@ -78,44 +93,39 @@ The same scripted walk, turn and stop on each backend (side view of the steady w
 | CoreML, Neural Engine | 0.15 m/s | 3.0 cm |
 | CoreML, GPU | 0.15 m/s | 4.5 cm |
 
-Foot slide = toe speed while within 6 cm of the ground (lower is better). `python tools/motion_quality.py`
+`python tools/motion_quality.py`
 
-### Crowds
+### Speed
 
-![Crowd NPCs in real time](docs/images/crowd_capacity.png)
+![Time per generation](docs/images/generation_time.png)
 
-| NPCs (6 processes, 15 Hz) | Settings | Real-time factor | Clips generated |
-|---|---|---|---|
-| 200 | NVIDIA / player-style | 1.06× | 1.58 per NPC per s |
-| 200 | calm crowd profile | 1.36× | 0.97 per NPC per s |
-| 300 | calm crowd profile | 1.06× | 0.97 per NPC per s |
+| Backend (one character) | Time per generation | Where the work runs (CoreML compute plan) |
+|---|---|---|
+| ONNX Runtime, CPU | 26–27 ms | CPU |
+| CoreML, CPU + GPU | ~12 ms | GPU 89%, CPU 11% |
+| CoreML, let CoreML choose (`ALL`) | — | GPU 86%, Neural Engine 13% |
+| **CoreML, CPU + Neural Engine** | **~10 ms** | **Neural Engine 99%**, CPU 1% |
 
-Every NPC is a full NVIDIA character (state machine, obstacle interactions). Real-time factor ≥ 1 means the
-crowd keeps up. `python -m cmb.crowd 200 300 --procs 6` (add `--player-style` for NVIDIA settings).
-
-![Close-up of the crowd demo: 250 NPCs, 50 of them mid-jump or duck](docs/images/crowd_closeup.png)
-
-The browser demo draws every NPC with one instanced mesh whose bone transforms are computed in a vertex shader,
-so the page costs ~0.05 ms of JavaScript per frame at 250 NPCs.
+`python tools/motion_quality.py`, `python tools/bench_neural_engine.py`
 
 ### Responsiveness
 
 | | |
 |---|---|
-| Input → visible movement | ~0.4 s (NVIDIA's runtime; ~0.56 s with its default smoothing) |
+| Input → visible movement | about 0.5 s with NVIDIA's default smoothing; about 0.4 s with `demos/course.py --responsive` |
 | Shortest generated clip | 0.8 s (6 tokens), so a stop always plays out |
-| Server step, one character | 1–3 ms per frame plus ~10 ms per generation |
+| Runtime step, one character | 1–3 ms per frame, plus ~10 ms per generation |
 
-![Course demo: one character in NVIDIA's gym scene](docs/images/course.png)
+These come from MotionBricks' design (it commits to believable clips), not from the port.
 
 ### Is it a good fit?
 
 | Use | Fit |
 |---|---|
-| Background NPCs, crowds, ambient characters | **Good**: ~300 on an M2 Pro, GPU left free |
-| Offline animation generation, previs | **Good**: ~10 ms per clip, accurate |
-| Player character in an action game | **Poor**: ~0.4 s response, clips commit ≥ 0.8 s |
-| Shipping in a native app | **Possible, not done here**: needs the runtime ported from Python (Swift/C++) |
+| NPCs and ambient characters | **Good**: ~10 ms per clip, GPU left free (see the crowd experiment below) |
+| Offline animation generation, previs, prototyping | **Good**: accurate, fast enough to iterate |
+| Player character in an action game | **Poor**: ~0.4–0.5 s response, clips commit ≥ 0.8 s |
+| Shipping in a native app | **Possible, not done here**: the runtime is Python; would need porting (Swift/C++) |
 
 Not measured: power draw, other Macs (M1/M3/M4, base or Max chips), long-running stability beyond the
 stress tests.
@@ -136,61 +146,103 @@ cd coreml-motion-bricks                                             # only the N
 .venv/bin/python tools/check_accuracy.py     # optional: verify against the fp32 reference
 ```
 
-Then try a demo:
+Run NVIDIA's own examples on the Mac:
 
 ```sh
-.venv/bin/python demos/course.py             # one character, keyboard control: http://localhost:8765
-.venv/bin/python demos/crowd.py --npcs 250   # street crowd: http://localhost:8775
+.venv/bin/python tools/run_upstream_example.py generate_once
+.venv/bin/python tools/run_upstream_example.py locomotion_loop
 ```
 
-**Course** (WASD move, Shift run, C crouch, Q strafe, `[` style, E interact): NVIDIA's gym scene; the
-character jumps, vaults, ducks and sits when it reaches the obstacles. **Crowd**: NPCs walk a street and take
-on the obstacles; drag to orbit, scroll to zoom. The crowd takes a minute or two to start (workers load in
-turn).
-
-Headless crowd stress test:
+Or drive a character in the browser (NVIDIA's gym scene, NVIDIA's settings):
 
 ```sh
-.venv/bin/python -m cmb.crowd 200 300 --procs 6
+.venv/bin/python demos/course.py             # http://localhost:8765
 ```
+
+WASD move, Shift run, C crouch, Q strafe, `[` cycle styles, N back to normal, E interact. The character jumps,
+ducks and sits when it reaches the obstacles, as in NVIDIA's Scene Preview.
 
 ## Using it in your own code
 
+With NVIDIA's engine API (as in their [Runtime API docs](https://github.com/NVlabs/motionbricks/blob/main/docs/runtime_api.md)),
+swap the engine class:
+
+```python
+import cmb.engine                     # sets up imports for NVIDIA's code; CoreML instead of TensorRT
+from cmb.engine import MacSOMAEngine  # in place of motionbricks.model.soma.engine.MotionBricksSOMAEngine
+# to_runtime: the model-to-world transform, as in NVIDIA's docs/examples/_rig.py
+engine = MacSOMAEngine("CPU_AND_NE", model_to_runtime=to_runtime)
+# ... engine.create_input(...), engine.generate_animation(context, target, output) as in NVIDIA's docs
+```
+
+Or the headless Scene Preview runtime:
+
 ```python
 from cmb.sim import Session
-s = Session()                                   # NVIDIA's gym scene, CoreML on the Neural Engine
+s = Session()                                   # NVIDIA's gym scene and settings, Neural Engine
 for _ in range(300):
-    s.step(1 / 30, move=(0, 1), facing=(0, 1))  # walk +Y; jumps/vaults trigger at obstacles
+    s.step(1 / 30, move=(0, 1), facing=(0, 1))  # walk +Y; interactions trigger at the obstacles
     joints = s.world_joints()                   # (77, 3) world-space joint positions, Z up
 ```
 
-`cmb.engine.MacSOMAEngine` is a drop-in for NVIDIA's `MotionBricksSOMAEngine` if you use their API directly.
 Backends: `"CPU_AND_NE"` (default), `"CPU_AND_GPU"`, `"ALL"`, `"FP32:ALL"` (needs `cmb.convert --fp32`),
 `"ort"`.
+
+## Tracking upstream
+
+* `third_party/motionbricks` is NVIDIA's repository as a git submodule at the tested commit, unmodified.
+* What the port touches, all in this repo: `cmb/_compat.py` (stubs for TensorRT and the viewer packages),
+  `cmb/engine.py` (a subclass of NVIDIA's engine that calls CoreML instead of TensorRT), and `cmb/convert.py`
+  (ONNX → CoreML). The character runtime, smart primitives, scenes and clips are NVIDIA's.
+* To try a newer MotionBricks: update the submodule, rerun `./setup.sh`, `python -m cmb.convert`, then
+  `tools/check_accuracy.py`, `tools/scene_preview_parity.py` and the upstream examples. A change to the model's
+  inputs/outputs or to `MotionBricksSOMAEngine` internals may need updates here.
+
+## Experiment: crowds
+
+Not part of MotionBricks: an experiment in how many independent MotionBricks characters a Mac can run. Every
+NPC is a full NVIDIA character (state machine, obstacle interactions); generations are batched onto the Neural
+Engine and NPCs are split over worker processes.
+
+![250 MotionBricks NPCs on a street, generated on the Neural Engine](docs/images/crowd.png)
+
+| NPCs (6 processes, 15 Hz) | Settings | Real-time factor | Clips generated |
+|---|---|---|---|
+| 150 | NVIDIA defaults | 1.23× | 1.58 per NPC per s |
+| 200 | NVIDIA defaults | 1.01× | 1.58 per NPC per s |
+| 200 | calm crowd profile | 1.36× | 0.97 per NPC per s |
+| 300 | calm crowd profile | 1.06× | 0.97 per NPC per s |
+
+Real-time factor ≥ 1 means the crowd keeps up. The *calm crowd profile* is this repo's addition, not
+NVIDIA's: longer clips and less sensitive regeneration, which asks for ~40% fewer clips at the same foot slide.
+Neural Engine throughput rises with batch size (`tools/bench_neural_engine.py`):
+
+![Neural Engine throughput by batch size](docs/images/ne_throughput.png)
+
+Batch sizes above 4 needed three Neural Engine workarounds in the conversion ([findings](docs/findings.md)).
+
+```sh
+.venv/bin/python demos/crowd.py --npcs 250        # http://localhost:8775 (workers take ~2 min to start)
+.venv/bin/python -m cmb.crowd 200 300 --procs 6    # headless; add --nvidia-settings for NVIDIA's defaults
+```
+
+![Close-up of the crowd demo](docs/images/crowd_closeup.png)
 
 ## Layout
 
 | Path | |
 |---|---|
-| `cmb/convert.py` | ONNX → CoreML conversion with all fixes |
 | `cmb/engine.py` | `MacSOMAEngine`: NVIDIA's engine with CoreML in place of TensorRT |
-| `cmb/sim.py` | Headless NVIDIA character runtime (state machine, smart primitives) |
-| `cmb/crowd.py`, `cmb/street.py` | Batched multi-NPC crowd, street scene, stress test |
+| `cmb/convert.py` | ONNX → CoreML conversion with all fixes |
+| `cmb/sim.py` | Headless Scene Preview runtime (NVIDIA's state machine, smart primitives) |
 | `cmb/_compat.py` | Import shims for NVIDIA's TensorRT/viewer dependencies |
-| `demos/` | Browser demos (three.js) |
-| `tools/` | Accuracy check, Neural Engine benchmark, batch-bug bisection |
+| `cmb/crowd.py`, `cmb/street.py` | Crowd experiment |
+| `demos/` | Browser demos: `course.py` (one character), `crowd.py` |
+| `tools/` | Upstream example runner, parity test, accuracy check, motion quality, benchmarks, batch-bug bisection |
 | `third_party/motionbricks` | NVIDIA MotionBricks, pinned submodule (unmodified) |
-
-## Limitations
-
-* SOMA (human) model only; the Unitree G1 robot model isn't converted.
-* Tied to the pinned MotionBricks commit: `cmb` subclasses and patches parts of NVIDIA's runtime.
-* Response time (~0.4 s from input to visible motion, clips ≥ 0.8 s) suits NPCs better than a player
-  character.
-* NPCs don't avoid each other; only NVIDIA's obstacle interactions are used.
 
 ## Licence
 
 Apache-2.0 for this project's code (`LICENSE`). NVIDIA MotionBricks code is Apache-2.0 / CC-BY-4.0, and its
-models are under the NVIDIA Open Model Agreement — this repo doesn't redistribute models; see
+models are under the NVIDIA Open Model Agreement. This repo doesn't redistribute models; see
 [NOTICE.md](NOTICE.md). Not affiliated with or endorsed by NVIDIA.

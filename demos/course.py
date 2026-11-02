@@ -39,7 +39,7 @@ TICK = 1 / 60
 
 
 class Game:
-    def __init__(self, backend, responsive=True):
+    def __init__(self, backend, responsive=False):
         self.session = Session(backend=backend, settings=RESPONSIVE if responsive else None)
         self.input = {"move": [0, 0], "facing": [0, 1], "run": False, "interact": False}
         self.pending_mode = None
@@ -121,7 +121,7 @@ class Game:
 async def main(args):
     httpd = ThreadingHTTPServer(("127.0.0.1", args.port), _Handler)
     Thread(target=httpd.serve_forever, daemon=True).start()
-    game = Game(args.backend, responsive=not args.nvidia_smoothing)
+    game = Game(args.backend, responsive=args.responsive)
     async with websockets.serve(game.handle, "127.0.0.1", args.port + 1):
         print(f"ready: http://localhost:{args.port}  (backend {args.backend})", flush=True)
         await game.loop()
@@ -131,6 +131,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)
     # CPU_AND_NE runs the network on the Neural Engine and keeps the GPU free.
-    ap.add_argument("--nvidia-smoothing", action="store_true", help="use NVIDIA's slower default input smoothing")
+    ap.add_argument("--responsive", action="store_true",
+                    help="faster input smoothing than NVIDIA's defaults (cmb.sim.RESPONSIVE); not part of MotionBricks")
     ap.add_argument("--backend", default="CPU_AND_NE", help="ort, CPU_ONLY, CPU_AND_NE, CPU_AND_GPU or ALL")
     asyncio.run(main(ap.parse_args()))

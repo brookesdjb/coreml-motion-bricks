@@ -23,8 +23,9 @@ from app.runtime.soma.character import SOMACharacter  # noqa: E402
 DEFAULT_SCENE = UPSTREAM / "assets" / "scenes" / "soma_gym.scene.json"
 MAX_DT = 0.1
 
-# NVIDIA's defaults smooth input heavily (speed half-life 0.6 s up / 0.4 s down) for a weighty feel.
-# This preset reacts roughly twice as fast; regeneration thresholds are unchanged.
+# Optional, not part of MotionBricks. NVIDIA's defaults (used unless you pass settings=) smooth input heavily
+# (speed half-life 0.6 s up / 0.4 s down) for a weighty feel. This preset reacts roughly twice as fast;
+# regeneration thresholds are unchanged. demos/course.py --responsive uses it.
 RESPONSIVE = LocomotionSettings(facing_halflife=0.08, velocity_direction_halflife=0.1,
                                 speed_acceleration_halflife=0.25, speed_deceleration_halflife=0.18)
 
