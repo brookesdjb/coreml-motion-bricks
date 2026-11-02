@@ -1,0 +1,6 @@
+# generated models, compiled models, recorded inputs, logs
+build/
+.venv/
+__pycache__/
+*.pyc
+.DS_Store

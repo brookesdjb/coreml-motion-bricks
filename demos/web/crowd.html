@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MotionBricks Crowd</title>
+<style>
+  :root { --bg: #151a21; --panel: rgba(15, 19, 25, 0.84); --text: #e6e9ee; --muted: #8b95a3; --ok: #4fd18b; --warn: #f2b84b; --bad: #ef6b6b; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, sans-serif; overflow: hidden; }
+  canvas { display: block; }
+  #hud { position: fixed; top: 12px; left: 12px; background: var(--panel); padding: 10px 12px; border-radius: 8px; min-width: 250px; backdrop-filter: blur(6px); }
+  #hud h1 { font-size: 13px; margin: 0 0 6px; font-weight: 600; }
+  .row { display: flex; justify-content: space-between; gap: 16px; }
+  .k { color: var(--muted); }
+  .bar { height: 6px; background: #2a313b; border-radius: 3px; margin: 2px 0 6px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0; border-radius: 3px; transition: width .2s; }
+  #keys { position: fixed; bottom: 12px; left: 12px; background: var(--panel); padding: 8px 12px; border-radius: 8px; color: var(--muted); }
+  #keys b { color: var(--text); font-weight: 600; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <h1>MotionBricks crowd · Neural Engine</h1>
+  <div class="row"><span class="k">server</span><span id="status">connecting…</span></div>
+  <div class="row"><span class="k">NPCs</span><span id="npcs">–</span></div>
+  <div class="row"><span class="k">slowest worker tick / budget</span><span id="tick">–</span></div>
+  <div class="bar"><div id="tickbar"></div></div>
+  <div class="row"><span class="k">Neural Engine time per tick (all workers)</span><span id="ne">–</span></div>
+  <div class="bar"><div id="nebar" style="background: var(--ok)"></div></div>
+  <div class="row"><span class="k">generations / s</span><span id="gens">–</span></div>
+  <div class="row"><span class="k">real time</span><span id="lag">–</span></div>
+  <div class="row"><span class="k">jumping / ducking now</span><span id="inter">–</span></div>
+  <div class="row"><span class="k">render fps</span><span id="fps">–</span></div>
+  <div class="row"><span class="k">crowd JS per frame</span><span id="drawms">–</span></div>
+</div>
+<div id="keys"><b>drag</b> orbit · <b>right-drag</b> / <b>WASD</b> pan · <b>wheel</b> zoom</div>
+<script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }</script>
+<script type="module">
+import * as THREE from "three";
+
+// Server world is Z-up (x, y, z); three.js is Y-up: (x, y, z) -> (x, z, -y).
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x9fb4c8);
+scene.fog = new THREE.Fog(0x9fb4c8, 60, 140);
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 400);
+scene.add(new THREE.HemisphereLight(0xe8f0ff, 0x404650, 1.0));
+const sun = new THREE.DirectionalLight(0xfff4e0, 1.6);
+sun.position.set(20, 40, 10);
+sun.castShadow = true;
+sun.shadow.mapSize.set(4096, 4096);
+Object.assign(sun.shadow.camera, { left: -40, right: 40, top: 45, bottom: -45, near: 1, far: 120 });
+sun.target.position.set(0, 0, -30);
+scene.add(sun, sun.target);
+
+const road = new THREE.Mesh(new THREE.PlaneGeometry(12, 200), new THREE.MeshStandardMaterial({ color: 0x3b4048, roughness: 0.95 }));
+road.rotation.x = -Math.PI / 2; road.position.set(0, 0, -30); road.receiveShadow = true; scene.add(road);
+const pave = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), new THREE.MeshStandardMaterial({ color: 0x6d737b, roughness: 1 }));
+pave.rotation.x = -Math.PI / 2; pave.position.set(0, -0.01, -30); pave.receiveShadow = true; scene.add(pave);
+
+// ---- scene + instanced crowd ----
+let J = 0, N = 0, parents = [], bonePairs = [], bones = null, heads = null;
+// One frame history per worker process: {t, start, count, data} where data is count x J x 3 joint positions.
+const workerFrames = [];
+function buildScene(msg) {
+  for (const c of msg.cubes) {
+    const [w, d, h] = c.size;
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshStandardMaterial({ color: new THREE.Color(...c.color), roughness: 0.8 }));
+    m.position.set(c.p[0], c.p[2], -c.p[1]);
+    m.quaternion.set(c.q[0], c.q[2], -c.q[1], c.q[3]);
+    m.castShadow = m.receiveShadow = true;
+    scene.add(m);
+  }
+  J = msg.joints.length; N = msg.npcs; parents = msg.parents;
+  bonePairs = parents.map((p, j) => [j, p]).filter(([, p]) => p >= 0);
+  const radius = (name) => /Spine|Chest|Hips/.test(name) ? 0.075 : /Leg|Shin/.test(name) ? 0.05 : /Neck|Hand/.test(name) ? 0.03 : 0.035;
+  // Joint positions live in a J x N float texture; the vertex shader turns each (joint, parent) pair into a
+  // capsule, so the CPU only interpolates positions instead of building ~3,500 matrices a frame.
+  jointData = new Float32Array(J * N * 4);
+  jointTex = new THREE.DataTexture(jointData, J, N, THREE.RGBAFormat, THREE.FloatType);
+  jointTex.minFilter = jointTex.magFilter = THREE.NearestFilter;
+  jointTex.needsUpdate = true;
+  const col = new THREE.Color();
+  const npcColor = (n) => col.setHSL((n * 0.618) % 1, 0.45, 0.6);
+  const make = (baseGeo, perNpc) => {
+    const geo = new THREE.InstancedBufferGeometry().copy(baseGeo);
+    const count = N * perNpc.length;
+    const bone = new Float32Array(count * 4), color = new Float32Array(count * 3);
+    for (let n = 0, i = 0; n < N; n++) {
+      npcColor(n);
+      for (const [ja, jb, r] of perNpc) {
+        bone.set([n, ja, jb, r], i * 4); color.set([col.r, col.g, col.b], i * 3); i++;
+      }
+    }
+    geo.setAttribute("aBone", new THREE.InstancedBufferAttribute(bone, 4));
+    geo.setAttribute("aColor", new THREE.InstancedBufferAttribute(color, 3));
+    geo.instanceCount = count;
+    const mesh = new THREE.Mesh(geo, crowdMaterial(new THREE.MeshStandardMaterial({ roughness: 0.6 })));
+    mesh.customDepthMaterial = crowdMaterial(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking }));
+    mesh.castShadow = true;
+    mesh.frustumCulled = false;  // positions come from the texture, so three.js can't know the bounds
+    scene.add(mesh);
+    return mesh;
+  };
+  bones = make(new THREE.CylinderGeometry(1, 1, 1, 8), bonePairs.map(([j, p]) => [j, p, radius(msg.joints[j])]));
+  heads = make(new THREE.SphereGeometry(0.11, 12, 10), [[6, 6, 0]]);  // radius 0 marks a head: centred on joint 6
+  document.getElementById("npcs").textContent = `${N} in ${msg.procs} processes @ ${msg.hz} Hz`;
+}
+
+let jointData = null, jointTex = null;
+const crowdUniforms = { uJoints: { value: null } };
+function crowdMaterial(mat) {
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uJoints = crowdUniforms.uJoints;
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", `#include <common>
+attribute vec4 aBone;   // npc, joint, parent joint, radius (0 = head sphere)
+attribute vec3 aColor;
+uniform sampler2D uJoints;
+varying vec3 vCrowdColor;
+vec3 crowdJoint(float j) { return texelFetch(uJoints, ivec2(int(j), int(aBone.x)), 0).xyz; }
+void crowdBasis(out vec3 X, out vec3 Y, out vec3 Z, out vec3 mid, out float len) {
+  if (aBone.w <= 0.0) { X = vec3(1, 0, 0); Y = vec3(0, 1, 0); Z = vec3(0, 0, 1); mid = crowdJoint(aBone.y) + vec3(0, 0.06, 0); len = 1.0; return; }
+  vec3 a = crowdJoint(aBone.y), b = crowdJoint(aBone.z), d = a - b;
+  len = max(length(d), 1e-4);
+  Y = length(d) > 1e-4 ? d / len : vec3(0, 1, 0);
+  vec3 ref = abs(Y.y) < 0.99 ? vec3(0, 1, 0) : vec3(1, 0, 0);
+  X = normalize(cross(ref, Y)); Z = cross(X, Y); mid = 0.5 * (a + b);
+}`)
+      .replace("#include <beginnormal_vertex>", `vec3 cX, cY, cZ, cMid; float cLen; crowdBasis(cX, cY, cZ, cMid, cLen);
+vec3 objectNormal = normalize(cX * normal.x + cY * normal.y + cZ * normal.z);
+#ifdef USE_TANGENT
+vec3 objectTangent = vec3( tangent.xyz );
+#endif`)
+      .replace("#include <begin_vertex>", `vec3 bX, bY, bZ, bMid; float bLen; crowdBasis(bX, bY, bZ, bMid, bLen);
+float r = aBone.w > 0.0 ? aBone.w : 1.0, l = aBone.w > 0.0 ? bLen : 1.0;
+vec3 transformed = bMid + bX * position.x * r + bY * position.y * l + bZ * position.z * r;
+vCrowdColor = aColor;`);
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vCrowdColor;")
+      .replace("vec4 diffuseColor = vec4( diffuse, opacity );", "vec4 diffuseColor = vec4( vCrowdColor, opacity );");
+  };
+  return mat;
+}
+
+const PLAYBACK_DELAY = 0.1;
+let clockOffset = null;
+let drawMs = 0;
+function drawCrowd() {
+  if (!bones || clockOffset === null) return;
+  const t0 = performance.now();
+  const now = t0 / 1000 - clockOffset - PLAYBACK_DELAY;
+  for (const frames of workerFrames) {
+    if (!frames || !frames.length) continue;
+    while (frames.length > 2 && frames[1].t <= now) frames.shift();
+    const f0 = frames[0], f1 = frames[1] ?? frames[0];
+    const t = f1.t > f0.t ? Math.min(1, Math.max(0, (now - f0.t) / (f1.t - f0.t))) : 1;
+    const a0 = f0.data, a1 = f1.data, n0 = f0.start, cnt = Math.min(f0.count, f1.count);
+    for (let k = 0; k < cnt; k++) {
+      for (let j = 0; j < J; j++) {
+        const i = (k * J + j) * 3, o = ((n0 + k) * J + j) * 4;
+        // server (x, y, z) Z-up -> three (x, z, -y)
+        jointData[o] = a0[i] + (a1[i] - a0[i]) * t;
+        jointData[o + 1] = a0[i + 2] + (a1[i + 2] - a0[i + 2]) * t;
+        jointData[o + 2] = -(a0[i + 1] + (a1[i + 1] - a0[i + 1]) * t);
+      }
+    }
+  }
+  jointTex.needsUpdate = true;
+  crowdUniforms.uJoints.value = jointTex;
+  drawMs = drawMs * 0.95 + (performance.now() - t0) * 0.05;
+}
+
+// ---- networking ----
+const $ = (id) => document.getElementById(id);
+function connect() {
+  const ws = new WebSocket(`ws://${location.hostname}:${Number(location.port) + 1}`);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => { $("status").textContent = "connected"; $("status").style.color = "var(--ok)"; };
+  ws.onclose = () => { $("status").textContent = "disconnected – retrying"; $("status").style.color = "var(--warn)"; setTimeout(connect, 1500); };
+  ws.onmessage = (ev) => {
+    if (typeof ev.data !== "string") {
+      // Header: worker id, worker sim time, first NPC index, NPC count; then count x J x 3 floats.
+      const f = new Float32Array(ev.data);
+      const w = f[0], frame = { t: f[1], start: f[2], count: f[3], data: f.subarray(4) };
+      // Workers share one schedule, so one clock offset fits them all; track the earliest arrival.
+      const offset = performance.now() / 1000 - frame.t;
+      clockOffset = clockOffset === null || offset < clockOffset ? offset : clockOffset + (offset - clockOffset) * 0.01;
+      (workerFrames[w] ??= []).push(frame);
+      if (workerFrames[w].length > 40) workerFrames[w].shift();
+      return;
+    }
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "scene" && !bones) buildScene(msg);
+    if (msg.type === "stats") {
+      const load = msg.tick_ms / msg.budget_ms, ne = msg.ne_ms / msg.budget_ms;
+      $("tick").textContent = `${msg.tick_ms} / ${msg.budget_ms} ms`;
+      $("tickbar").style.width = `${Math.min(100, load * 100)}%`;
+      $("tickbar").style.background = load < 0.8 ? "var(--ok)" : load < 1 ? "var(--warn)" : "var(--bad)";
+      $("ne").textContent = `${msg.ne_ms} ms (${Math.round(ne * 100)}%)`;
+      $("nebar").style.width = `${Math.min(100, ne * 100)}%`;
+      $("gens").textContent = msg.gens_per_s;
+      // Workers load one after another; until they are all streaming there is nothing to keep up with.
+      const starting = msg.ready < msg.procs || msg.gens_per_s === 0;
+      $("lag").textContent = starting ? "starting…" : msg.lag_s > 0.3 ? `${msg.lag_s.toFixed(1)} s behind` : "keeping up";
+      $("lag").style.color = starting ? "var(--warn)" : msg.lag_s > 0.3 ? "var(--bad)" : "var(--ok)";
+      $("inter").textContent = msg.interacting;
+    }
+  };
+}
+connect();
+
+// ---- camera: orbit / pan / zoom ----
+// Start looking down the street (+Y world = -Z three) from above its near end, clear of the buildings.
+let yaw = Math.PI / 2 - 0.12, pitch = 0.62, dist = 34; const target = new THREE.Vector3(0, 1, -22);
+let drag = 0;
+renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
+renderer.domElement.addEventListener("pointerdown", (e) => { drag = e.button === 2 ? 2 : 1; renderer.domElement.setPointerCapture(e.pointerId); });
+renderer.domElement.addEventListener("pointerup", () => { drag = 0; });
+renderer.domElement.addEventListener("pointermove", (e) => {
+  if (drag === 1) { yaw -= e.movementX * 0.005; pitch = Math.min(1.45, Math.max(0.05, pitch + e.movementY * 0.004)); }
+  if (drag === 2) { const k = dist * 0.0015; target.x -= (Math.cos(yaw) * e.movementX) * k; target.z += (Math.sin(yaw) * e.movementX) * k; target.z -= (Math.cos(yaw) * e.movementY) * k * -1; target.x += Math.sin(yaw) * e.movementY * k * -1; }
+});
+addEventListener("wheel", (e) => { dist = Math.min(120, Math.max(3, dist * (1 + e.deltaY * 0.001))); }, { passive: true });
+const keys = new Set();
+addEventListener("keydown", (e) => keys.add(e.code)); addEventListener("keyup", (e) => keys.delete(e.code)); addEventListener("blur", () => keys.clear());
+
+let last = performance.now(), fpsFrames = 0, fpsT = last;
+function tick() {
+  requestAnimationFrame(tick);
+  const now = performance.now(), dt = (now - last) / 1000; last = now;
+  const sp = dist * 0.8 * dt, f = new THREE.Vector3(-Math.cos(yaw), 0, -Math.sin(yaw)), r = new THREE.Vector3(-f.z, 0, f.x);
+  if (keys.has("KeyW")) target.addScaledVector(f, sp); if (keys.has("KeyS")) target.addScaledVector(f, -sp);
+  if (keys.has("KeyD")) target.addScaledVector(r, sp); if (keys.has("KeyA")) target.addScaledVector(r, -sp);
+  camera.position.set(target.x + Math.cos(yaw) * Math.cos(pitch) * dist, target.y + Math.sin(pitch) * dist, target.z + Math.sin(yaw) * Math.cos(pitch) * dist);
+  camera.lookAt(target);
+  drawCrowd();
+  renderer.render(scene, camera);
+  if (++fpsFrames, now - fpsT > 1000) { $("fps").textContent = Math.round(fpsFrames * 1000 / (now - fpsT)); $("drawms").textContent = `${drawMs.toFixed(2)} ms`; fpsFrames = 0; fpsT = now; }
+}
+tick();
+addEventListener("resize", () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+</script>
+</body>
+</html>
