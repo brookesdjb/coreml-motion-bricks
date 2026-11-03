@@ -4,3 +4,13 @@ build/
 __pycache__/
 *.pyc
 .DS_Store
+
+# Swift samples: models, exported feeds and build products are generated, never committed
+*.mlpackage
+*.mlmodelc
+swift/Feeds/
+swift/Models/
+swift/Apps/iOS/Resources/
+swift/.build/
+swift/MotionBricksKit/.build/
+swift/MotionBricksSamples.xcodeproj/

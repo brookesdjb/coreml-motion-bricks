@@ -1,0 +1,45 @@
+name: MotionBricksSamples
+options:
+  bundleIdPrefix: com.example.motionbricks
+  deploymentTarget:
+    macOS: "15.0"
+    iOS: "18.0"
+packages:
+  MotionBricksKit:
+    path: MotionBricksKit
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    GENERATE_INFOPLIST_FILE: YES
+    CODE_SIGN_STYLE: Automatic
+targets:
+  MotionBricksMac:
+    type: application
+    platform: macOS
+    sources: [Apps/Shared, Apps/macOS]
+    dependencies: [{package: MotionBricksKit, product: MotionBricksKit}]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.motionbricks.mac
+        ENABLE_APP_SANDBOX: NO   # reads the model and feeds straight from the repo checkout
+        INFOPLIST_KEY_CFBundleDisplayName: MotionBricks
+  MotionBricksiOS:
+    type: application
+    platform: iOS
+    sources:
+      - Apps/Shared
+      - path: Apps/iOS/Resources/soma_b1.mlpackage
+        optional: true
+      - path: Apps/iOS/Resources/Feeds
+        type: folder
+        optional: true
+    dependencies: [{package: MotionBricksKit, product: MotionBricksKit}]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.motionbricks.ios
+        INFOPLIST_KEY_CFBundleDisplayName: MotionBricks
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
