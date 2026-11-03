@@ -39,6 +39,9 @@ public struct BenchmarkView: View {
             ForEach(Array(results.enumerated().reversed()), id: \.offset) { _, r in
                 Section(r.compute.rawValue) {
                     LabeledContent("Accuracy", value: String(format: "mean |Δ| %.4f", r.meanAbsDiff))
+                    if let pose = r.poseMeanError, let mx = r.poseMaxError {
+                        LabeledContent("Joint positions", value: String(format: "mean %.1f mm, max %.1f mm", pose * 1000, mx * 1000))
+                    }
                     LabeledContent("Same clip length", value: "\(r.sameLength)/\(r.samples)")
                     LabeledContent("Per call", value: String(format: "%.2f ms median, %.2f ms p90", r.medianMs, r.p90Ms))
                     LabeledContent("Load + compile", value: String(format: "%.1f s", r.loadSeconds))
@@ -84,7 +87,7 @@ public struct BenchmarkView: View {
                 }
             }.value
             results.append(r)
-            print(r.summary + "\n  placement: " + (r.placement.map(String.init(describing:)) ?? "unavailable"))
+            print(r.summary + "\n  " + (r.poseSummary ?? "") + "\n  placement: " + (r.placement.map(String.init(describing:)) ?? "unavailable"))
         } catch {
             self.error = String(describing: error)
             print("error: \(error)")

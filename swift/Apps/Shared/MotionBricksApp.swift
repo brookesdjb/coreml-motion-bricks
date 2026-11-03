@@ -5,10 +5,8 @@ import SwiftUI
 struct MotionBricksApp: App {
     var body: some Scene {
         WindowGroup {
-            NavigationStack {
-                BenchmarkView(modelURL: Locations.model, feedsURL: Locations.feeds,
-                              autorun: ProcessInfo.processInfo.environment["MB_AUTORUN"] == "1")
-            }
+            DemoView(modelURL: Locations.model, feedsURL: Locations.feeds,
+                     autorun: ProcessInfo.processInfo.environment["MB_AUTORUN"] == "1")
         }
     }
 }

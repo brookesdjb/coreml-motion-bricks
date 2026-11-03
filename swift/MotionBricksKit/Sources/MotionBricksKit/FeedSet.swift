@@ -9,10 +9,16 @@ public struct FeedSet: Sendable {
     }
 
     public var samples: [Sample]
+    /// Python-decoded joint world positions (runtime space) for some samples: (sample index, [frame][joint]).
+    public var parity: [(sample: Int, positions: [[SIMD3<Float>]])] = []
+    /// The SOMA rig, if tools/export_swift_rig.py has been run on this folder.
+    public var rig: Rig?
 
     private struct Manifest: Decodable {
         struct Tensor: Decodable { var file: String; var dtype: String; var shape: [Int] }
+        struct Parity: Decodable { var sample: Int; var file: String; var shape: [Int] }
         var samples: [[String: Tensor]]
+        var parity: [Parity]?
     }
 
     public init(directory: URL) throws {
@@ -38,6 +44,17 @@ public struct FeedSet: Sendable {
                     allowedPredNumTokens: try raw("allowed_pred_num_tokens", Int32.self)),
                 referenceMotion: try raw("ref_pred_global_motions", Float.self),
                 referenceTokens: Int(try raw("ref_pred_num_tokens", Int32.self)[0]))
+        }
+        let rigURL = directory.appendingPathComponent("rig.json")
+        if FileManager.default.fileExists(atPath: rigURL.path) { rig = try Rig(url: rigURL) }
+        parity = try (manifest.parity ?? []).map { p in
+            let data = try Data(contentsOf: directory.appendingPathComponent(p.file))
+            let flat: [Float] = data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+            let (frames, joints) = (p.shape[0], p.shape[1])
+            guard flat.count == frames * joints * 3 else { throw SOMAError.badFeeds("\(p.file) size") }
+            return (p.sample, (0..<frames).map { f in
+                (0..<joints).map { j in let o = (f * joints + j) * 3; return SIMD3(flat[o], flat[o + 1], flat[o + 2]) }
+            })
         }
     }
 }
