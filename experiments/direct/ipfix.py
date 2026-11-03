@@ -196,6 +196,54 @@ def gathers_as_onehot(gm):
     gm.graph.lint(); gm.recompile()
     return n_done
 
+def _embedding_as_onehot(w, idx):
+    """embedding(w, idx) as a one-hot (float compare) times the table. At batch 2 the Neural Engine miscomputed
+    the gather -> reshape -> linear chain that follows the token embedding."""
+    pos = idx.to(w.dtype).unsqueeze(-1)
+    onehot = (pos == torch.arange(w.shape[0], dtype=w.dtype, device=w.device)).to(w.dtype)
+    return onehot @ w
+
+def embeddings_as_onehot(gm):
+    n_done = 0
+    for n in list(gm.graph.nodes):
+        if n.target != torch.ops.aten.embedding.default or len(n.args) > 2 and n.args[2] != -1:
+            continue  # padding_idx only matters for the backward pass, but keep to the plain form
+        with gm.graph.inserting_before(n):
+            new = gm.graph.call_function(_embedding_as_onehot, n.args[:2])
+        new.meta = dict(n.meta)
+        n.replace_all_uses_with(new); gm.graph.erase_node(n); n_done += 1
+    gm.graph.lint(); gm.recompile()
+    return n_done
+
+def _attn_out_proj_batch_first(b, y, w, rows):
+    """addmm(b, y.permute(2, 0, 1, 3).reshape(rows, c), w) for attention output y (B, H, T, D), computed
+    batch-first: (B, T, H*D) @ w + b, then transposed to nn.MultiheadAttention's (T, B, E) and flattened."""
+    z = y.permute(0, 2, 1, 3).reshape(y.shape[0], y.shape[2], -1) @ w + b
+    return z.transpose(0, 1).reshape(rows, w.shape[-1])
+
+def attn_out_proj_batch_first(gm):
+    """nn.MultiheadAttention flattens its (B, H, T, D) output seq-first, as (T * B, H * D) rows, into the output
+    projection. At batch 4 the Neural Engine compiler rejected that transpose -> reshape -> linear (and so dropped
+    the whole program to the CPU); batch-first, the transpose moves after the linear and cancels against the
+    transpose back to batch-first that follows."""
+    n_done = 0
+    for n in list(gm.graph.nodes):
+        if n.target != torch.ops.aten.addmm.default or n.kwargs:
+            continue
+        b, v, w = n.args
+        if v.target != torch.ops.aten.view.default:
+            continue
+        x = v.args[0]
+        p = x.args[0] if x.target == torch.ops.aten.clone.default else x  # .contiguous() after the transpose
+        if p.target != torch.ops.aten.permute.default or list(p.args[1]) != [2, 0, 1, 3]:
+            continue
+        with gm.graph.inserting_before(n):
+            new = gm.graph.call_function(_attn_out_proj_batch_first, (b, p.args[0], w, v.meta["val"].shape[0]))
+        new.meta = dict(n.meta)
+        n.replace_all_uses_with(new); gm.graph.erase_node(n); n_done += 1
+    gm.graph.lint(); gm.recompile()
+    return n_done
+
 def _softmax_zero_if_all_masked(x, dim):
     """aten._safe_softmax: softmax, but 0 for rows whose entries are all masked. Its decomposition is an int
     fill_like and bool any/logical_not per attention layer, which can't run on the Neural Engine. Same values,
