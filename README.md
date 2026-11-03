@@ -189,6 +189,14 @@ for _ in range(300):
 Backends: `"CPU_AND_NE"` (default), `"CPU_AND_GPU"`, `"ALL"`, `"FP32:ALL"` (needs `cmb.convert --fp32`),
 `"ort"`.
 
+### Native Swift (Mac and iPhone)
+
+[`swift/`](swift/README.md) has sample macOS and iOS apps over one shared Swift package: they load the batch-1
+CoreML model, generate clips on the Neural Engine, decode them with a Swift port of NVIDIA's pose decode, and
+play the skeleton back. On an **iPhone 18 Pro** a generation takes **~6.8 ms** on the Neural Engine (vs ~9.7 ms
+on the M2 Pro), within the same accuracy bar. NVIDIA's controller isn't ported yet, so the apps play individual
+clips rather than steerable motion.
+
 ## Tracking upstream
 
 * `third_party/motionbricks` is NVIDIA's repository as a git submodule at the tested commit, unmodified.
