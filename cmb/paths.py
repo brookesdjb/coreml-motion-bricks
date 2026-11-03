@@ -5,15 +5,12 @@ REPO = Path(__file__).resolve().parents[1]
 UPSTREAM = REPO / "third_party" / "motionbricks"  # NVlabs/motionbricks, pinned as a git submodule
 BUILD = REPO / "build"                            # generated models, compiled models, logs (git-ignored)
 
+# NVIDIA's published fp16 ONNX model: the "ort" reference backend, which also records the inputs below
 SOURCE_ONNX = UPSTREAM / "motionbricks" / "assets" / "onnx" / "soma" / "mmm_v6_soma_fp16.onnx"
-ONNX_DIR = BUILD / "onnx"
 COREML_DIR = BUILD / "coreml"
 COMPILED_DIR = BUILD / "compiled"
 LOG_DIR = BUILD / "logs"
-FEEDS = BUILD / "feeds.npz"  # real network inputs recorded from NVIDIA's runtime (convert step 2)
-
-STATIC_ONNX = ONNX_DIR / "soma_fp16_b1.onnx"       # batch-1 graph for the ONNX Runtime backend
-REFERENCE_ONNX = ONNX_DIR / "soma_fp32_b1.onnx"    # pure fp32 reference for accuracy checks
+FEEDS = BUILD / "feeds.npz"  # real network inputs recorded from NVIDIA's runtime (cmb.convert, first run)
 
 BATCH_SIZES = (1, 2, 4, 8)
 

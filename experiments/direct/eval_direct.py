@@ -11,7 +11,7 @@ with torch.no_grad():
     refs = [[t.numpy() for t in m(*(torch.from_numpy(f[k]) for k in INPUT_NAMES))] for f in feeds]
 for B in map(int, sys.argv[1:]):
     for units in os.environ.get("UNITS", "CPU_AND_NE,CPU_AND_GPU").split(","):
-        mm = ct.models.MLModel(os.environ.get("PKG", "build/coreml/direct_b{B}.mlpackage").format(B=B), compute_units=getattr(ct.ComputeUnit, units))
+        mm = ct.models.MLModel(os.environ.get("PKG", "build/coreml/soma_b{B}.mlpackage").format(B=B), compute_units=getattr(ct.ComputeUnit, units))
         names = [i.name for i in mm.get_spec().description.input]
         errs, same, ts = [], 0, []
         for s in range(0, n - B + 1, B):

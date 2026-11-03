@@ -1,4 +1,11 @@
+"""FX graph rewrites applied to NVIDIA's captured PyTorch model before conversion (cmb/convert.py).
+
+Each one replaces a pattern with the same maths written in ops that coremltools converts and the Neural Engine
+runs correctly; convert.py checks the rewritten graph against eager PyTorch. Why each one exists:
+experiments/direct/RESULTS.md and docs/findings.md.
+"""
 import torch
+
 
 def _put_last_dim(x, idx, values):
     """x[..., idx] = values, written as a one-hot matmul and a mask blend (exact; no scatter op)."""
@@ -6,6 +13,7 @@ def _put_last_dim(x, idx, values):
     placed = torch.matmul(values.to(x.dtype), select)        # (..., D): values at idx, 0 elsewhere
     keep = 1 - select.sum(0).clamp(max=1)                     # (D,): 0 at idx, 1 elsewhere
     return x * keep + placed
+
 
 def rewrite_index_put(gm):
     n_done = 0
@@ -26,8 +34,10 @@ def rewrite_index_put(gm):
     gm.graph.lint(); gm.recompile()
     return n_done
 
+
 def _scatter_value(x, dim, index, value):
     return torch.scatter(x, dim, index, torch.full(index.shape, value, dtype=x.dtype, device=x.device))
+
 
 def rewrite_scatter_value(gm):
     """scatter(x, dim, index, <python scalar>) -> scatter with a tensor of x's dtype (coremltools typed it int32)."""
@@ -44,10 +54,12 @@ def rewrite_scatter_value(gm):
     gm.graph.lint(); gm.recompile()
     return n_done
 
+
 def _int_scatter(x, dim, index, src):
     # Small integer data (token counts <= 64): exact in fp16/fp32, and avoids coremltools' int/float mix-up.
     src = src if torch.is_tensor(src) else torch.full(index.shape, src, device=x.device)
     return torch.scatter(x.float(), dim, index, src.float()).to(x.dtype)
+
 
 def rewrite_int_scatter(gm):
     n_done = 0
@@ -67,6 +79,7 @@ def rewrite_int_scatter(gm):
     gm.graph.lint(); gm.recompile()
     return n_done
 
+
 def positive_cumsum_axes(gm):
     """coremltools rejects valid negative cumsum axes; rewrite them as positive."""
     n_done = 0
@@ -77,6 +90,7 @@ def positive_cumsum_axes(gm):
             n_done += 1
     gm.recompile()
     return n_done
+
 
 def finite_masks(gm, value=-1.0e4):
     """-inf attention-mask fills -> a large finite negative (same softmax result, fp16-safe on the Neural Engine)."""
@@ -91,11 +105,14 @@ def finite_masks(gm, value=-1.0e4):
     gm.recompile()
     return n_done
 
+
 def _static_full(shape, value, dtype):
     return torch.full(shape, value, dtype=dtype)
 
+
 def _sort_as_topk(x, dim=-1, descending=False):
     return torch.topk(x, x.shape[dim], dim=dim, largest=descending, sorted=True)
+
 
 def static_fills_and_sort(gm):
     """zeros_like/full_like/ones_like -> constant-shape full (shapes are static here); sort -> full-length topk.
@@ -120,18 +137,12 @@ def static_fills_and_sort(gm):
     gm.graph.lint(); gm.recompile()
     return n_fill, n_sort
 
-def _scatter_one_as_mask(x, dim, index, src):
-    """scatter writing one position along `dim` -> where(arange == index, src, x). Same values; avoids
-    scatter_along_axis, which made the Neural Engine compiler reject the whole program."""
-    d = dim % x.dim()
-    shape = [1] * x.dim(); shape[d] = x.shape[d]
-    mask = torch.arange(x.shape[d], device=x.device).reshape(shape) == (index.long() % x.shape[d])
-    return torch.where(mask, src.to(x.dtype).expand_as(x) if src.shape != x.shape else src.to(x.dtype), x)
 
 def _scatter_one_as_float_mask(x, dim, index, src):
-    """Same as _scatter_one_as_mask, but the position test is done in x's float type (positions <= 64 are exact
-    in fp16): the integer modulo/compare/tile version ran on the CPU and handed (B, 64, 512) masks back to the
-    Neural Engine. Integer x is computed in float and cast back."""
+    """scatter writing one position along `dim`, as a blend with a position mask: same values, no scatter op
+    (scatter_along_axis made the Neural Engine compiler reject the whole program). The position test is done in
+    x's float type (positions <= 64 are exact in fp16): an integer modulo/compare/tile version ran on the CPU and
+    handed (B, 64, 512) masks back to the Neural Engine. Integer x is computed in float and cast back."""
     xf = x if x.is_floating_point() else x.float()
     d = dim % x.dim(); n = x.shape[d]
     shape = [1] * x.dim(); shape[d] = n
@@ -143,9 +154,8 @@ def _scatter_one_as_float_mask(x, dim, index, src):
     out = xf * (1 - m) + src.to(xf.dtype) * m
     return out if x.is_floating_point() else out.to(x.dtype)
 
+
 def scatters_as_masks(gm):
-    import os
-    fn = _scatter_one_as_float_mask if os.environ.get("FLOAT_SCATTER_MASK") else _scatter_one_as_mask
     n_done = 0
     for n in list(gm.graph.nodes):
         if n.target not in (torch.ops.aten.scatter.src, _int_scatter):
@@ -156,20 +166,20 @@ def scatters_as_masks(gm):
         d = dim % len(x.meta["val"].shape)
         if index.meta["val"].shape[d] != 1:
             continue
-        if fn is _scatter_one_as_float_mask:
-            # the index is usually a position repeated across channels; compare against the un-repeated one
-            while index.target in (torch.ops.aten.repeat.default, torch.ops.aten.expand.default) and \
-                    index.args[0].meta["val"].dim() == index.meta["val"].dim():
-                index = index.args[0]
-            if hasattr(src, "target") and src.target in (torch.ops.aten.repeat.default, torch.ops.aten.expand.default) \
-                    and src.args[0].meta["val"].dim() == src.meta["val"].dim():
-                src = src.args[0]
+        # the index is usually a position repeated across channels; compare against the un-repeated one
+        while index.target in (torch.ops.aten.repeat.default, torch.ops.aten.expand.default) and \
+                index.args[0].meta["val"].dim() == index.meta["val"].dim():
+            index = index.args[0]
+        if hasattr(src, "target") and src.target in (torch.ops.aten.repeat.default, torch.ops.aten.expand.default) \
+                and src.args[0].meta["val"].dim() == src.meta["val"].dim():
+            src = src.args[0]
         with gm.graph.inserting_before(n):
-            new = gm.graph.call_function(fn, (x, dim, index, src))
+            new = gm.graph.call_function(_scatter_one_as_float_mask, (x, dim, index, src))
         new.meta = dict(n.meta)
         n.replace_all_uses_with(new); gm.graph.erase_node(n); n_done += 1
     gm.graph.lint(); gm.recompile()
     return n_done
+
 
 def _gather_as_onehot(x, dim, index):
     """gather(x, dim, index) for float x as a one-hot select-and-sum along `dim`: same values, no gather op.
@@ -180,6 +190,7 @@ def _gather_as_onehot(x, dim, index):
     onehot = (im.unsqueeze(-1) == torch.arange(xm.shape[-1], device=x.device)).to(x.dtype)  # (..., K, N)
     out = (onehot * xm.unsqueeze(-2)).sum(-1)                      # (..., K)
     return out.movedim(-1, d)
+
 
 def gathers_as_onehot(gm):
     n_done = 0
@@ -196,12 +207,14 @@ def gathers_as_onehot(gm):
     gm.graph.lint(); gm.recompile()
     return n_done
 
+
 def _embedding_as_onehot(w, idx):
     """embedding(w, idx) as a one-hot (float compare) times the table. At batch 2 the Neural Engine miscomputed
     the gather -> reshape -> linear chain that follows the token embedding."""
     pos = idx.to(w.dtype).unsqueeze(-1)
     onehot = (pos == torch.arange(w.shape[0], dtype=w.dtype, device=w.device)).to(w.dtype)
     return onehot @ w
+
 
 def embeddings_as_onehot(gm):
     n_done = 0
@@ -215,11 +228,13 @@ def embeddings_as_onehot(gm):
     gm.graph.lint(); gm.recompile()
     return n_done
 
+
 def _attn_out_proj_batch_first(b, y, w, rows):
     """addmm(b, y.permute(2, 0, 1, 3).reshape(rows, c), w) for attention output y (B, H, T, D), computed
     batch-first: (B, T, H*D) @ w + b, then transposed to nn.MultiheadAttention's (T, B, E) and flattened."""
     z = y.permute(0, 2, 1, 3).reshape(y.shape[0], y.shape[2], -1) @ w + b
     return z.transpose(0, 1).reshape(rows, w.shape[-1])
+
 
 def attn_out_proj_batch_first(gm):
     """nn.MultiheadAttention flattens its (B, H, T, D) output seq-first, as (T * B, H * D) rows, into the output
@@ -244,12 +259,14 @@ def attn_out_proj_batch_first(gm):
     gm.graph.lint(); gm.recompile()
     return n_done
 
+
 def _softmax_zero_if_all_masked(x, dim):
     """aten._safe_softmax: softmax, but 0 for rows whose entries are all masked. Its decomposition is an int
     fill_like and bool any/logical_not per attention layer, which can't run on the Neural Engine. Same values,
     float-only: masked entries are <= -1e4 after finite_masks (or -inf), real scores are far above that."""
     keep = (x > -5.0e3).to(x.dtype).amax(dim, keepdim=True)
     return torch.softmax(x, dim) * keep
+
 
 def safe_softmax_as_float(gm):
     n_done = 0
@@ -263,12 +280,14 @@ def safe_softmax_as_float(gm):
     gm.graph.lint(); gm.recompile()
     return n_done
 
+
 def _conv1d_batch_folded(x, w, b, stride, padding, dilation, groups):
     """Conv1d over (B, C, L) computed as a Conv2d over (1, C, B, L) with a 1-tall kernel: same maths, but the
     Neural Engine sees one image instead of a batch (the published ONNX route does the same at batch > 4)."""
     y = torch.nn.functional.conv2d(x.permute(1, 0, 2).unsqueeze(0), w.unsqueeze(2), b, (1, stride[0]),
                                    (0, padding[0]), (1, dilation[0]), groups)
     return y.squeeze(0).permute(1, 0, 2)
+
 
 def fold_conv1d_batch(gm):
     n_done = 0
@@ -285,9 +304,11 @@ def fold_conv1d_batch(gm):
     gm.graph.lint(); gm.recompile()
     return n_done
 
+
 def _repeat_last(x, k):
     """Nearest-neighbour upsampling by an integer factor along the last axis, as expand + reshape."""
     return x.unsqueeze(-1).expand(*x.shape, k).reshape(*x.shape[:-1], x.shape[-1] * k)
+
 
 def nearest_upsample_as_repeat(gm):
     """upsample_nearest1d arrives decomposed as _unsafe_index(x, [None, None, floor(arange * scale)]), a gather.
@@ -307,6 +328,7 @@ def nearest_upsample_as_repeat(gm):
     gm.graph.eliminate_dead_code(); gm.graph.lint(); gm.recompile()
     return n_done
 
+
 def _slice_scatter_as_cat(x, src, dim, start, end):
     d = dim % x.dim(); n = x.shape[d]
     start = 0 if start is None else (start + n if start < 0 else min(start, n))
@@ -317,9 +339,11 @@ def _slice_scatter_as_cat(x, src, dim, start, end):
         parts.append(x.narrow(d, end, n - end))
     return torch.cat(parts, d) if len(parts) > 1 else parts[0]
 
+
 def _select_scatter_as_cat(x, src, dim, index):
     d = dim % x.dim()
     return _slice_scatter_as_cat(x, src.unsqueeze(d), d, index % x.shape[d], index % x.shape[d] + 1)
+
 
 def scatters_as_cat(gm):
     """slice_scatter / select_scatter (functionalized in-place slice writes) -> the source itself when it covers
@@ -346,3 +370,29 @@ def scatters_as_cat(gm):
         n.replace_all_uses_with(new); gm.graph.erase_node(n); n_done += 1
     gm.graph.lint(); gm.recompile()
     return n_done
+
+
+# (name, rewrite, batch sizes it applies to), in the order applied. finite_masks must precede
+# safe_softmax_as_float. Above batch 4 the Neural Engine also needs Conv1d batches folded (and convert.py keeps
+# tensors under 128 elements in fp32).
+REWRITES = [
+    ("index_put", rewrite_index_put, None),
+    ("int scatter", rewrite_int_scatter, None),
+    ("scatter value", rewrite_scatter_value, None),
+    ("cumsum axes", positive_cumsum_axes, None),
+    ("finite masks", finite_masks, None),
+    ("fills and sort", static_fills_and_sort, None),
+    ("scatter -> mask", scatters_as_masks, None),
+    ("gather -> one-hot", gathers_as_onehot, None),
+    ("Conv1d batch fold", fold_conv1d_batch, lambda b: b > 4),
+    ("upsample -> repeat", nearest_upsample_as_repeat, lambda b: b > 4),
+    ("slice/select scatter -> cat", scatters_as_cat, None),
+    ("safe softmax -> float", safe_softmax_as_float, None),
+    ("embedding -> one-hot", embeddings_as_onehot, None),
+    ("attention out-projection batch-first", attn_out_proj_batch_first, None),
+]
+
+
+def apply(gm, batch):
+    """Apply every rewrite that applies at this batch size; returns {name: count}."""
+    return {name: fn(gm) for name, fn, applies in REWRITES if applies is None or applies(batch)}

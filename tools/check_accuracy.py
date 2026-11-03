@@ -1,10 +1,11 @@
-"""Check every converted CoreML package against the pure-fp32 ONNX reference on real recorded inputs.
+"""Check every converted CoreML package against NVIDIA's fp32 PyTorch model on real recorded inputs.
 
     python tools/check_accuracy.py            # all batch sizes, Neural Engine + GPU
     python tools/check_accuracy.py --units CPU_AND_NE
 
-For each package: mean absolute difference over the valid frames (NVIDIA's own fp16 ONNX model scores ~0.008
-here), whether the model chose the same clip length, and per-call time.
+For each package: mean absolute difference over the valid frames (NVIDIA's own fp16 ONNX model scores ~0.006
+here), whether the model chose the same clip length, and per-call time. `python -m cmb.convert` runs the
+same check on the Neural Engine before it saves a package.
 """
 import argparse
 import sys
@@ -14,22 +15,20 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np  # noqa: E402
 
-from cmb.convert import INPUT_NAMES  # noqa: E402
+from cmb.convert import INPUT_NAMES, all_feeds, reference_outputs  # noqa: E402
 from cmb.engine import load_coreml, split_outputs  # noqa: E402
-from cmb.paths import BATCH_SIZES, FEEDS, REFERENCE_ONNX, coreml_package, coreml_package_fp32  # noqa: E402
+from cmb.paths import BATCH_SIZES, coreml_package, coreml_package_fp32  # noqa: E402
+from cmb.upstream_model import build_model  # noqa: E402
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--units", nargs="+", default=["CPU_AND_NE", "CPU_AND_GPU"])
     args = ap.parse_args()
-    import onnxruntime as ort
-    z = np.load(FEEDS)
-    feeds = [{k: z[f"{k}_{i}"] for k in INPUT_NAMES} for i in range(int(z["n"]))]
-    ref = ort.InferenceSession(str(REFERENCE_ONNX), providers=["CPUExecutionProvider"])
-    refs = [ref.run(None, f) for f in feeds]
+    feeds = all_feeds()
+    refs = reference_outputs(build_model(), feeds)
     packages = [(b, coreml_package(b)) for b in BATCH_SIZES] + [(1, coreml_package_fp32())]
-    print(f"{len(feeds)} recorded generations; reference {REFERENCE_ONNX.name}")
+    print(f"{len(feeds)} recorded generations; reference: NVIDIA's PyTorch model (fp32)")
     for batch, pkg in packages:
         if not pkg.exists():
             continue

@@ -5,7 +5,7 @@ No ONNX and no onnx2torch. Machine: M2 Pro 16 GB, macOS 26, coremltools 9.0, tor
 
 ## Outcome
 
-| | old ONNX route (`soma_bN`) | direct route (`direct_bN`) |
+| | old ONNX route (tag `onnx-route`) | direct route (now `soma_bN`) |
 |---|---|---|
 | **batch 1** NE accuracy (mean\|Δ\| vs NVIDIA PyTorch, 84 inputs) | 0.0091 | **0.0093**, same length 84/84 |
 | batch 1 placement (`placement.py`) | NE 1173 ops / 99% cost, 8 NE segments | NE 1570 ops / 99% cost, 8 NE segments |
@@ -53,7 +53,7 @@ No ONNX and no onnx2torch. Machine: M2 Pro 16 GB, macOS 26, coremltools 9.0, tor
 
 **It is not a fixed segment cap.** A batch-8 variant with fp32 `layer_norm` ran 55 NE segments. One particular piece fails to compile depending on how the graph is cut. That is why the earlier session's rewrites (sort → topk, static fills, scatter/gather) appeared to help or hurt: they moved the cuts around.
 
-**Fix (`ipfix.safe_softmax_as_float`).**
+**Fix (`fx_rewrites.safe_softmax_as_float`).**
 - `softmax(x) * amax(x > -5e3)`: float-only and the same values.
 - Used together with `finite_masks`, so masked scores are −1e4 and never −inf; that way a fully masked row gives 0, not NaN.
 - The int and bool islands disappear: batch 1 goes to **8 NE segments, the same as the old route**.
@@ -74,12 +74,12 @@ No ONNX and no onnx2torch. Machine: M2 Pro 16 GB, macOS 26, coremltools 9.0, tor
 - This is the same problem the old route documents ("Neural Engine at batch > 4 gave different results per batch slot").
 
 **Fix: the old route's two workarounds, ported as FX rewrites.**
-- Ops whose largest output has fewer than **128** elements are kept fp32. CoreML runs those on the CPU (`direct_try.py <B> 128`).
+- Ops whose largest output has fewer than **128** elements are kept fp32. CoreML runs those on the CPU.
   - Threshold sweep: 0 and 64 are still wrong (0.30); 128 and 256 are right.
   - So the culprits are 64–127-element tensors, e.g. the (8,8) `has_*` masks.
-- `ipfix.fold_conv1d_batch`: each Conv1d is computed as a Conv2d over (1, C, B, L), so the NE sees one image.
+- `fx_rewrites.fold_conv1d_batch`: each Conv1d is computed as a Conv2d over (1, C, B, L), so the NE sees one image.
   - This is the speed fix: batch 8 went from 29.7 to 24.4 ms per call, and from 452 to 640 chars/s queued.
-- `ipfix.nearest_upsample_as_repeat`: the decomposed `upsample_nearest1d` gather becomes expand + reshape. Speed is unchanged, but it removes 4 gathers; optional.
+- `fx_rewrites.nearest_upsample_as_repeat`: the decomposed `upsample_nearest1d` gather becomes expand + reshape. Speed is unchanged, but it removes 4 gathers; optional.
 
 **Batch 1 does not want these.** With threshold 128, batch 1 on the NE drops to 0.051. So the recipe depends on batch size, as the old route's does: these workarounds apply only above batch 4.
 
@@ -105,7 +105,7 @@ With fixes 1 and 2, batch 8 was accurate but took 24.5 ms per call (old route 21
 **b) `aten.slice_scatter` / `select_scatter`** (functionalized in-place slice writes).
 - coremltools lowers these to `scatter` on the flattened tensor: at batch 8, six (187,392,) scatters on the CPU, in the motion-assembly tail.
 - 12 of the 15 overwrite the whole tensor, so they are just their source.
-- Fix: `ipfix.scatters_as_cat` (`SCATTER_CAT=1`): the source for full-tensor writes, otherwise a `cat` of the untouched pieces and the source.
+- Fix: `fx_rewrites.scatters_as_cat` (`SCATTER_CAT=1`): the source for full-tensor writes, otherwise a `cat` of the untouched pieces and the source.
 - Result: 23.5 → 22.4 ms.
 
 **Both fixes help batch 1 a little too** (9.3 → 8.8 ms), so they are part of the recipe at every batch size.
@@ -130,39 +130,35 @@ With the batch-1 recipe, batch 2 stayed on the NE (98%) but was wrong: 0.24, wit
 
 ## Reproduce
 
-Run from the repo root with `.venv/bin/python`. Packages land in `build/coreml/direct_b{1,2,4,8}.mlpackage`.
+This route is now `cmb/convert.py`; the rewrites are `cmb/fx_rewrites.py`. The experiment harness it replaced
+(`direct_try.py` with one env flag per rewrite, `fx_rewrites.py`, `capshim.py`, `ctfix.py`, `bisect_ne.py`) is in
+this directory's history up to commit 6b05f6e. The ONNX route is tagged `onnx-route`.
 
 ```bash
-# batch 1; the same for 2 and 4 with that argument
-FP32_OPS="" FINITE_MASKS=1 FLOAT_SAFE_SOFTMAX=1 FLOAT_SCATTER_MASK=1 SCATTER_CAT=1 ONEHOT_EMBED=1 ATTN_BATCH_FIRST=1 .venv/bin/python experiments/direct/direct_try.py 1
-# batch 8 (batch > 4): also fold Conv1d batches, repeat-upsample, small tensors (<128 elements) in fp32
-FP32_OPS="" FINITE_MASKS=1 FLOAT_SAFE_SOFTMAX=1 FLOAT_SCATTER_MASK=1 SCATTER_CAT=1 ONEHOT_EMBED=1 ATTN_BATCH_FIRST=1 FOLD_CONV=1 REPEAT_UPSAMPLE=1 .venv/bin/python experiments/direct/direct_try.py 8 128
-
-.venv/bin/python experiments/direct/placement.py build/coreml/direct_b1.mlpackage
+.venv/bin/python -m cmb.convert                  # build/coreml/soma_b{1,2,4,8}.mlpackage, each checked before saving
+.venv/bin/python experiments/direct/placement.py build/coreml/soma_b1.mlpackage
 .venv/bin/python experiments/direct/eval_direct.py 1 2 4 8
-.venv/bin/python experiments/direct/bench_direct.py build/coreml/direct_b1.mlpackage:1 build/coreml/soma_b1.mlpackage:1 build/coreml/direct_b2.mlpackage:2 build/coreml/soma_b2.mlpackage:2 build/coreml/direct_b4.mlpackage:4 build/coreml/soma_b4.mlpackage:4 build/coreml/direct_b8.mlpackage:8 build/coreml/soma_b8.mlpackage:8
+.venv/bin/python experiments/direct/bench_direct.py build/coreml/soma_b1.mlpackage:1 build/coreml/soma_b8.mlpackage:8
 ```
 
-**Rewrite set, in the order `direct_try.py` applies it.**
-
-`ipfix` FX rewrites:
+**Rewrite set, in the order applied** (`fx_rewrites.REWRITES`):
 - `rewrite_index_put`, `rewrite_int_scatter`, `rewrite_scatter_value`, `positive_cumsum_axes`
-- `finite_masks` (**required** by the next rewrite)
+- `finite_masks` (**required** by `safe_softmax_as_float`)
 - `static_fills_and_sort`
-- `scatters_as_masks`, with **`FLOAT_SCATTER_MASK=1`** (float position test, blend instead of `where`)
+- `scatters_as_masks` (float position test, blend instead of `where`)
 - `gathers_as_onehot`
 - `fold_conv1d_batch` and `nearest_upsample_as_repeat`, at batch > 4 only
-- **`scatters_as_cat`** (`slice_scatter` / `select_scatter`)
-- **`safe_softmax_as_float`**
-- **`embeddings_as_onehot`**
-- **`attn_out_proj_batch_first`**
+- `scatters_as_cat` (`slice_scatter` / `select_scatter`)
+- `safe_softmax_as_float`
+- `embeddings_as_onehot`
+- `attn_out_proj_batch_first`
 
 Other parts:
-- Capture runs under `capshim` (`t.all` → True, `one_hot` as a comparison), with `sdpa_kernel(MATH)`.
-- `ctfix` patches coremltools' int/bool cast.
+- Capture runs with two capture-time shims on NVIDIA's `t` alias (`t.all` → True, `one_hot` as a comparison), with `sdpa_kernel(MATH)`.
+- coremltools' `int`/`bool` cast of one-element constants is patched.
 - Export uses the default decompositions plus `linalg_cross`, keeping `upsample` whole.
-- fp16 everywhere except the geometry op types listed in `direct_try.py` (sin/cos/atan/cumsum/real_div/…), plus the small-tensor rule at batch > 4.
-- `TARGET=macOS14`.
+- fp16 everywhere except the geometry op types (`convert.FP32_OPS`: sin/cos/atan/cumsum/real_div/…), plus ops on tensors under 128 elements at batch > 4.
+- `minimum_deployment_target=macOS14`.
 
 **Diagnostic tools added.**
 - `mil_window.py`
@@ -176,22 +172,14 @@ Other parts:
 - `bench_direct.py`: throughput, as `tools/bench_neural_engine.py` measures it.
 - `placement.py`: now also prints the NE/CPU segment count, and the top ops by cost with `TOP=n`.
 
-## Proposal: `cmb/convert.py` on the direct route
+## `cmb/convert.py` on the direct route (done)
 
-1. **Capture.** `cmb/upstream_model.build_model()` → `make_fx(functionalize(model))` under `sdpa_kernel(MATH)` and `capshim`.
-   - The shims live in `cmb/` and are applied at capture time only, so NVIDIA's code stays unmodified.
-2. **Rewrite.** Move `ipfix.py` to `cmb/fx_rewrites.py` as a list of `(name, fn, applies(batch))`.
-   - Assert the FX graph still matches eager PyTorch (≤ 1e-4) after rewriting, as `direct_try.py` does now.
-   - Make `FLOAT_SCATTER_MASK`'s version the only `scatters_as_masks`.
-   - Every size gets the same set; there is no batch-2 or batch-4 special case.
-   - Batch > 4 adds `fold_conv1d_batch`, `nearest_upsample_as_repeat` and the < 128-element fp32 rule.
-3. **Convert.** `torch.export` + decompositions → `ct.convert(..., compute_precision=FP16ComputePrecision(op_selector))`.
-   - The selector is the geometry list plus the small-tensor rule.
-   - This is NVIDIA's own `tools/onnx/precision.py` idea: networks fp16, geometry fp32.
-4. **Check before saving, per batch size.**
-   - Run `placement.py`'s check: fail if NE ops == 0. That catches any regression of the whole-program fallback.
-   - Run the 84-input accuracy check against `build_model()`: mean|Δ| ≤ 0.012, same length ≥ 83/84.
-5. **Remove** the ONNX / onnxsim / onnx2torch steps, their patches, and the onnx2torch dependency. Keep the old route on a tag for comparison.
+The proposal from this investigation, as implemented:
+1. **Capture** `cmb/upstream_model.build_model()` → `make_fx(functionalize(model))`. The shims are applied only during capture, so NVIDIA's code stays unmodified.
+2. **Rewrite** with `cmb/fx_rewrites.REWRITES`. The rewritten graph must match eager PyTorch (≤ 1e-3), or the conversion stops.
+3. **Convert** with `torch.export` → `ct.convert` and the fp16 op selector.
+4. **Check before saving**, per batch size: some ops must be on the Neural Engine, and over every recorded input the mean|Δ| vs NVIDIA's fp32 PyTorch must be ≤ 0.012, over the generations that chose the same clip length. At most 1 in 40 may choose a different length: on a near-tie, fp16 rounding can pick the neighbouring valid length. Inputs recorded from scratch had one such case in 84 (11 tokens vs 10, 0.199 on its own); the rest scored 0.0094.
+5. **Removed:** the ONNX simplify/upcast/onnx2torch steps, `tools/bisect_batch.py`, and the `onnx`, `onnxsim` and `onnx2torch` dependencies. ONNX Runtime stays only as the "ort" reference backend, which runs NVIDIA's published ONNX file directly.
 
 **Open items.**
 - **CPU work still left:** the FK and geometry on the inputs and outputs, (B,·,30,3) in fp32 by design, and the tail's one-hot `index_put` blends. That is fine for now; it's the next place to look if more speed is needed.

@@ -7,8 +7,8 @@ on a Mac, with the network on the **Apple Neural Engine**. No NVIDIA GPU or Tens
 ([paper](https://research.nvidia.com/labs/gear/motionbricks/pdfs/motionbricks_siggraph_2026.pdf)) generates
 full-body character motion between recent poses and target poses: walking, running, strafing, crouching,
 style variations, and interactions such as jumping, ducking and sitting. NVIDIA's release runs on TensorRT.
-This port **tracks the upstream project**: NVIDIA's code is a pinned, unmodified submodule; the same model is
-converted to CoreML on your machine; and NVIDIA's own character runtime and example scripts run on top of it.
+This port **tracks the upstream project**: NVIDIA's code is a pinned, unmodified submodule; NVIDIA's own
+PyTorch model, with their released weights, is converted to CoreML on your machine; and NVIDIA's own character runtime and example scripts run on top of it.
 Only the network call changes.
 
 ![One MotionBricks character in NVIDIA's gym scene, running on the Neural Engine](docs/images/course.png)
@@ -19,7 +19,7 @@ Only the network call changes.
   ducking, sitting) behave the same as with NVIDIA's reference model; NVIDIA's API examples run unmodified.
 * **Accurate**: matches NVIDIA's model on 84 recorded real generations; feet stay planted.
 * **~10 ms per generation** on the Neural Engine (99% of the work there; the GPU stays free for rendering),
-  vs ~27 ms with ONNX Runtime on the CPU.
+  vs ~28–30 ms with ONNX Runtime on the CPU.
 
 All numbers below were produced from a clean checkout with the commands shown, on one machine. Bugs found on
 the way and what didn't work: [docs/findings.md](docs/findings.md).
@@ -31,7 +31,7 @@ Against the pinned upstream commit
 
 | MotionBricks | On the Mac | How it was checked |
 |---|---|---|
-| SOMA (human) model | ✅ converted to CoreML | `tools/check_accuracy.py` vs the fp32 reference |
+| SOMA (human) model | ✅ converted to CoreML from NVIDIA's PyTorch model | `tools/check_accuracy.py` vs NVIDIA's PyTorch model (fp32) |
 | Engine API (`MotionBricksSOMAEngine`) | ✅ drop-in `cmb.engine.MacSOMAEngine` | NVIDIA's examples below |
 | `docs/examples/generate_once.py` | ✅ runs unmodified | `tools/run_upstream_example.py generate_once`: identical output on the Neural Engine and on ONNX Runtime (NVIDIA's model as published) |
 | `docs/examples/locomotion_loop.py` | ✅ runs unmodified | `tools/run_upstream_example.py locomotion_loop`: same 14 generations; path within 1 cm of ONNX Runtime after 9 s |
@@ -47,16 +47,16 @@ as published) and on the Neural Engine. Foot slide = toe speed while within 6 cm
 
 | Feature | ONNX Runtime (reference) | Neural Engine |
 |---|---|---|
-| Walk forward | ✅ 0.13 m/s | ✅ 0.11 m/s |
-| Run forward | ✅ 0.20 m/s | ✅ 0.23 m/s |
-| Strafe | ✅ 0.21 m/s | ✅ 0.20 m/s |
-| Crouch | ✅ 0.23 m/s | ✅ 0.19 m/s |
-| Style: skipping | ✅ 0.23 m/s | ✅ 0.23 m/s |
-| Style: vogue | ✅ 0.11 m/s | ✅ 0.10 m/s |
-| Style: injured torso | ✅ 0.14 m/s | ✅ 0.13 m/s |
-| Style: injured leg | ✅ 0.15 m/s | ✅ 0.14 m/s |
-| Style: zombie | ✅ 0.09 m/s | ✅ 0.10 m/s |
-| Style: combat | ✅ 0.11 m/s | ✅ 0.14 m/s |
+| Walk forward | ✅ 0.12 m/s | ✅ 0.13 m/s |
+| Run forward | ✅ 0.20 m/s | ✅ 0.22 m/s |
+| Strafe | ✅ 0.20 m/s | ✅ 0.18 m/s |
+| Crouch | ✅ 0.22 m/s | ✅ 0.23 m/s |
+| Style: skipping | ✅ 0.13 m/s | ✅ 0.13 m/s |
+| Style: vogue | ✅ 0.11 m/s | ✅ 0.12 m/s |
+| Style: injured torso | ✅ 0.14 m/s | ✅ 0.16 m/s |
+| Style: injured leg | ✅ 0.13 m/s | ✅ 0.14 m/s |
+| Style: zombie | ✅ 0.10 m/s | ✅ 0.09 m/s |
+| Style: combat | ✅ 0.14 m/s | ✅ 0.13 m/s |
 | Jump (low wall) | ✅ | ✅ |
 | Jump (high wall) | ✅ | ✅ |
 | Duck under bar | ✅ | ✅ |
@@ -68,16 +68,17 @@ as published) and on the Neural Engine. Foot slide = toe speed while within 6 cm
 
 ### Accuracy
 
-Each converted model vs NVIDIA's model (rewritten as pure fp32) on 84 network inputs recorded from NVIDIA's own
-runtime (walking, turning, running, both gym jumps). For scale, **NVIDIA's own fp16 ONNX model scores 0.008**
-on the same test.
+Each converted model vs NVIDIA's PyTorch model (fp32, their released weights) on 84 network inputs recorded
+from NVIDIA's own runtime (walking, turning, running, both gym jumps). For scale, **NVIDIA's own fp16 ONNX
+model scores 0.006** on the same test. `cmb.convert` runs this check on the Neural Engine before saving each
+package; the fp32 package (`--fp32`) matches exactly (0.0000).
 
 | Package | Neural Engine: mean \|Δ\| | same clip length | GPU: mean \|Δ\| |
 |---|---|---|---|
-| batch 1 | 0.0091 | 84 / 84 | 0.0091 |
-| batch 2 | 0.0091 | 84 / 84 | 0.0071 |
-| batch 4 | 0.0091 | 84 / 84 | 0.0078 |
-| batch 8 | 0.0099 | 80 / 80 | 0.0069 |
+| batch 1 | 0.0093 | 84 / 84 | 0.0100 |
+| batch 2 | 0.0093 | 84 / 84 | 0.0078 |
+| batch 4 | 0.0093 | 84 / 84 | 0.0077 |
+| batch 8 | 0.0101 | 80 / 80 | 0.0073 |
 
 `python tools/check_accuracy.py`
 
@@ -90,8 +91,8 @@ The same scripted walk, turn and stop on each backend (side view of the steady w
 | Backend | Planted-foot slide | Mean joint distance to ONNX Runtime |
 |---|---|---|
 | ONNX Runtime, CPU (reference) | 0.14 m/s | — |
-| CoreML, Neural Engine | 0.15 m/s | 3.0 cm |
-| CoreML, GPU | 0.15 m/s | 4.5 cm |
+| CoreML, Neural Engine | 0.14 m/s | 3.6 cm |
+| CoreML, GPU | 0.16 m/s | 4.2 cm |
 
 `python tools/motion_quality.py`
 
@@ -101,8 +102,8 @@ The same scripted walk, turn and stop on each backend (side view of the steady w
 
 | Backend (one character) | Time per generation | Where the work runs (CoreML compute plan) |
 |---|---|---|
-| ONNX Runtime, CPU | 26–27 ms | CPU |
-| CoreML, CPU + GPU | ~12 ms | GPU 89%, CPU 11% |
+| ONNX Runtime, CPU | 28–30 ms | CPU |
+| CoreML, CPU + GPU | ~13 ms | GPU 89%, CPU 11% |
 | CoreML, let CoreML choose (`ALL`) | — | GPU 86%, Neural Engine 13% |
 | **CoreML, CPU + Neural Engine** | **~10 ms** | **Neural Engine 99%**, CPU 1% |
 
@@ -142,8 +143,8 @@ stress tests.
 git clone https://github.com/brookesdjb/coreml-motion-bricks.git   # not --recursive: setup.sh fetches
 cd coreml-motion-bricks                                             # only the NVIDIA files it needs
 ./setup.sh                                   # venv + pinned NVIDIA checkout + model files (~0.5 GB from LFS)
-.venv/bin/python -m cmb.convert              # build the CoreML models into build/ (~10-15 min)
-.venv/bin/python tools/check_accuracy.py     # optional: verify against the fp32 reference
+.venv/bin/python -m cmb.convert              # NVIDIA's checkpoints (~0.8 GB) -> CoreML models in build/ (~10 min)
+.venv/bin/python tools/check_accuracy.py     # optional: convert already checked each package; this adds the GPU
 ```
 
 Run NVIDIA's own examples on the Mac:
@@ -193,7 +194,8 @@ Backends: `"CPU_AND_NE"` (default), `"CPU_AND_GPU"`, `"ALL"`, `"FP32:ALL"` (need
 * `third_party/motionbricks` is NVIDIA's repository as a git submodule at the tested commit, unmodified.
 * What the port touches, all in this repo: `cmb/_compat.py` (stubs for TensorRT and the viewer packages),
   `cmb/engine.py` (a subclass of NVIDIA's engine that calls CoreML instead of TensorRT), and `cmb/convert.py`
-  (ONNX → CoreML). The character runtime, smart primitives, scenes and clips are NVIDIA's.
+  with `cmb/fx_rewrites.py` (NVIDIA's PyTorch model → CoreML, built with NVIDIA's exporter code by
+  `cmb/upstream_model.py`). The character runtime, smart primitives, scenes and clips are NVIDIA's.
 * To try a newer MotionBricks: update the submodule, rerun `./setup.sh`, `python -m cmb.convert`, then
   `tools/check_accuracy.py`, `tools/scene_preview_parity.py` and the upstream examples. A change to the model's
   inputs/outputs or to `MotionBricksSOMAEngine` internals may need updates here.
@@ -208,10 +210,10 @@ Engine and NPCs are split over worker processes.
 
 | NPCs (6 processes, 15 Hz) | Settings | Real-time factor | Clips generated |
 |---|---|---|---|
-| 150 | NVIDIA defaults | 1.23× | 1.58 per NPC per s |
-| 200 | NVIDIA defaults | 1.01× | 1.58 per NPC per s |
-| 200 | calm crowd profile | 1.36× | 0.97 per NPC per s |
-| 300 | calm crowd profile | 1.06× | 0.97 per NPC per s |
+| 150 | NVIDIA defaults | 1.21× | 1.59 per NPC per s |
+| 200 | NVIDIA defaults | 1.05× | 1.58 per NPC per s |
+| 200 | calm crowd profile | 1.25× | 0.96 per NPC per s |
+| 300 | calm crowd profile | 1.03× | 0.98 per NPC per s |
 
 Real-time factor ≥ 1 means the crowd keeps up. The *calm crowd profile* is this repo's addition, not
 NVIDIA's: longer clips and less sensitive regeneration, which asks for ~40% fewer clips at the same foot slide.
@@ -219,7 +221,7 @@ Neural Engine throughput rises with batch size (`tools/bench_neural_engine.py`):
 
 ![Neural Engine throughput by batch size](docs/images/ne_throughput.png)
 
-Batch sizes above 4 needed three Neural Engine workarounds in the conversion ([findings](docs/findings.md)).
+Each batch size above 1 needed its own Neural Engine workaround in the conversion ([findings](docs/findings.md)).
 
 ```sh
 .venv/bin/python demos/crowd.py --npcs 250        # http://localhost:8775 (workers take ~2 min to start)
@@ -233,12 +235,14 @@ Batch sizes above 4 needed three Neural Engine workarounds in the conversion ([f
 | Path | |
 |---|---|
 | `cmb/engine.py` | `MacSOMAEngine`: NVIDIA's engine with CoreML in place of TensorRT |
-| `cmb/convert.py` | ONNX → CoreML conversion with all fixes |
+| `cmb/convert.py`, `cmb/fx_rewrites.py` | NVIDIA's PyTorch model → CoreML, with every fix and the checks it must pass |
+| `cmb/upstream_model.py` | NVIDIA's PyTorch model from their exporter code and released checkpoints |
 | `cmb/sim.py` | Headless Scene Preview runtime (NVIDIA's state machine, smart primitives) |
 | `cmb/_compat.py` | Import shims for NVIDIA's TensorRT/viewer dependencies |
 | `cmb/crowd.py`, `cmb/street.py` | Crowd experiment |
 | `demos/` | Browser demos: `course.py` (one character), `crowd.py` |
-| `tools/` | Upstream example runner, parity test, accuracy check, motion quality, benchmarks, batch-bug bisection |
+| `tools/` | Upstream example runner, parity test, accuracy check, motion quality, benchmarks |
+| `experiments/direct/` | How the conversion was made to run on the Neural Engine: results and diagnostic tools |
 | `third_party/motionbricks` | NVIDIA MotionBricks, pinned submodule (unmodified) |
 
 ## Licence
