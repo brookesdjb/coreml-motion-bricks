@@ -104,7 +104,7 @@ if __name__ == "__main__":
             if bad(mid, j): lo = mid
             else: hi = mid
         print(f"\nsmallest failing window: [{lo}, {j})  ({ops[lo].op_type} .. {ops[j-1].op_type} {ops[j-1].outputs[0].name})")
-    elif sys.argv[2] != "diverge":
+    elif sys.argv[2] not in ("diverge", "time"):
         i, j = int(sys.argv[2]), int(sys.argv[3])
         print(ne_count(i, j, keep=sys.argv[4] if len(sys.argv) > 4 else None))
 
@@ -167,3 +167,28 @@ if __name__ == "__main__" and sys.argv[2] == "diverge":
         if r > TH: hi = mid
         else: lo = mid
     print(f"\nfirst diverging cut: {hi} ({ops[hi-1].op_type} {ops[hi-1].outputs[0].name})")
+
+if __name__ == "__main__" and sys.argv[2] == "time":
+    # ms per call (CPU_AND_NE) of the prefixes [0, j) for each j given: where the time accumulates
+    import time, tempfile
+    sys.path.insert(0, ".")
+    from cmb.convert import INPUT_NAMES, load_feeds
+    B = int(sys.argv[3]); f = load_feeds(B)
+    names = [i.name for i in spec.description.input]
+    feed = {nm: f[k] for nm, k in zip(names, INPUT_NAMES)}
+    for j in map(int, sys.argv[4].split(",")):
+        j = min(j, N)
+        prog = window(0, j)
+        m = mil_convert(prog, convert_to="mlprogram", convert_from="milinternal",
+                        specification_version=spec.specificationVersion, compute_units=ct.ComputeUnit.CPU_AND_NE,
+                        pass_pipeline=ct.PassPipeline.EMPTY, skip_model_load=True)
+        d = tempfile.mkdtemp(dir=os.environ.get("TMPDIR")); m.save(d + "/w.mlpackage")
+        ct.utils.compile_model(d + "/w.mlpackage", d + "/w.mlmodelc")
+        mm = ct.models.CompiledMLModel(d + "/w.mlmodelc", compute_units=ct.ComputeUnit.CPU_AND_NE)
+        fd = {k: v for k, v in feed.items() if k in {i.name for i in m.get_spec().description.input}}
+        for _ in range(5): mm.predict(fd)
+        ts = []
+        for _ in range(40):
+            t = time.perf_counter(); mm.predict(fd); ts.append(time.perf_counter() - t)
+        print(f"  [0, {j}) {ops[j-1].op_type:<14} {ops[j-1].outputs[0].name:<36} {np.median(ts)*1000:6.2f} ms", flush=True)
+        del mm; shutil.rmtree(d, ignore_errors=True)

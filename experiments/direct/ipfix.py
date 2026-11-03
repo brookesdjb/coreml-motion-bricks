@@ -19,6 +19,7 @@ def rewrite_index_put(gm):
             raise NotImplementedError(f"unexpected index_put pattern at {n}")
         with gm.graph.inserting_before(n):
             new = gm.graph.call_function(_put_last_dim, (x, idx[-1], vals))
+        new.meta = dict(n.meta)
         n.replace_all_uses_with(new)
         gm.graph.erase_node(n)
         n_done += 1
@@ -36,6 +37,7 @@ def rewrite_scatter_value(gm):
             x, dim, index, value = n.args[:4]
             with gm.graph.inserting_before(n):
                 new = gm.graph.call_function(_scatter_value, (x, dim, index, value))
+            new.meta = dict(n.meta)
             n.replace_all_uses_with(new)
             gm.graph.erase_node(n)
             n_done += 1
@@ -126,7 +128,24 @@ def _scatter_one_as_mask(x, dim, index, src):
     mask = torch.arange(x.shape[d], device=x.device).reshape(shape) == (index.long() % x.shape[d])
     return torch.where(mask, src.to(x.dtype).expand_as(x) if src.shape != x.shape else src.to(x.dtype), x)
 
+def _scatter_one_as_float_mask(x, dim, index, src):
+    """Same as _scatter_one_as_mask, but the position test is done in x's float type (positions <= 64 are exact
+    in fp16): the integer modulo/compare/tile version ran on the CPU and handed (B, 64, 512) masks back to the
+    Neural Engine. Integer x is computed in float and cast back."""
+    xf = x if x.is_floating_point() else x.float()
+    d = dim % x.dim(); n = x.shape[d]
+    shape = [1] * x.dim(); shape[d] = n
+    pos = index.to(xf.dtype)
+    pos = pos + n * (pos < 0).to(xf.dtype)
+    m = (torch.arange(n, dtype=xf.dtype, device=x.device).reshape(shape) == pos).to(xf.dtype)
+    # x*(1-m) + src*m: exact for a 0/1 mask and finite x, and broadcasts as plain mul/add (coremltools tiles
+    # every select input to the full (B, 64, C) shape)
+    out = xf * (1 - m) + src.to(xf.dtype) * m
+    return out if x.is_floating_point() else out.to(x.dtype)
+
 def scatters_as_masks(gm):
+    import os
+    fn = _scatter_one_as_float_mask if os.environ.get("FLOAT_SCATTER_MASK") else _scatter_one_as_mask
     n_done = 0
     for n in list(gm.graph.nodes):
         if n.target not in (torch.ops.aten.scatter.src, _int_scatter):
@@ -137,8 +156,16 @@ def scatters_as_masks(gm):
         d = dim % len(x.meta["val"].shape)
         if index.meta["val"].shape[d] != 1:
             continue
+        if fn is _scatter_one_as_float_mask:
+            # the index is usually a position repeated across channels; compare against the un-repeated one
+            while index.target in (torch.ops.aten.repeat.default, torch.ops.aten.expand.default) and \
+                    index.args[0].meta["val"].dim() == index.meta["val"].dim():
+                index = index.args[0]
+            if hasattr(src, "target") and src.target in (torch.ops.aten.repeat.default, torch.ops.aten.expand.default) \
+                    and src.args[0].meta["val"].dim() == src.meta["val"].dim():
+                src = src.args[0]
         with gm.graph.inserting_before(n):
-            new = gm.graph.call_function(_scatter_one_as_mask, (x, dim, index, src))
+            new = gm.graph.call_function(fn, (x, dim, index, src))
         new.meta = dict(n.meta)
         n.replace_all_uses_with(new); gm.graph.erase_node(n); n_done += 1
     gm.graph.lint(); gm.recompile()
@@ -230,4 +257,44 @@ def nearest_upsample_as_repeat(gm):
         new.meta = dict(n.meta)
         n.replace_all_uses_with(new); gm.graph.erase_node(n); n_done += 1
     gm.graph.eliminate_dead_code(); gm.graph.lint(); gm.recompile()
+    return n_done
+
+def _slice_scatter_as_cat(x, src, dim, start, end):
+    d = dim % x.dim(); n = x.shape[d]
+    start = 0 if start is None else (start + n if start < 0 else min(start, n))
+    end = n if end is None else (end + n if end < 0 else min(end, n))
+    parts = [x.narrow(d, 0, start)] if start > 0 else []
+    parts.append(src.to(x.dtype))
+    if end < n:
+        parts.append(x.narrow(d, end, n - end))
+    return torch.cat(parts, d) if len(parts) > 1 else parts[0]
+
+def _select_scatter_as_cat(x, src, dim, index):
+    d = dim % x.dim()
+    return _slice_scatter_as_cat(x, src.unsqueeze(d), d, index % x.shape[d], index % x.shape[d] + 1)
+
+def scatters_as_cat(gm):
+    """slice_scatter / select_scatter (functionalized in-place slice writes) -> the source itself when it covers
+    the whole tensor, else a concat of the untouched pieces and the source. coremltools lowered them to scatters on
+    the flattened tensor, which the Neural Engine can't run (at batch 8: six (8*64*366,) scatters on the CPU)."""
+    n_done = 0
+    for n in list(gm.graph.nodes):
+        if n.target == torch.ops.aten.slice_scatter.default:
+            x, src = n.args[:2]
+            dim, start, end, step = (list(n.args[2:]) + [0, None, None, 1][len(n.args) - 2:])[:4]
+            if step != 1:
+                continue
+            if tuple(src.meta["val"].shape) == tuple(x.meta["val"].shape):
+                n.replace_all_uses_with(src); gm.graph.erase_node(n); n_done += 1
+                continue
+            fn, args = _slice_scatter_as_cat, (x, src, dim, start, end)
+        elif n.target == torch.ops.aten.select_scatter.default:
+            fn, args = _select_scatter_as_cat, tuple(n.args[:4])
+        else:
+            continue
+        with gm.graph.inserting_before(n):
+            new = gm.graph.call_function(fn, args)
+        new.meta = dict(n.meta)
+        n.replace_all_uses_with(new); gm.graph.erase_node(n); n_done += 1
+    gm.graph.lint(); gm.recompile()
     return n_done
