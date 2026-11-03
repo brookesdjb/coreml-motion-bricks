@@ -107,7 +107,7 @@ Not ported, because they need the runtime's state rather than one network call: 
 from the context pose (identity here), the **endpoint deltas** that blend clip ends into context/target poses,
 and the **controller** that stitches clips into continuous, steerable motion.
 
-## Results so far (M2 Pro, macOS 27, Xcode 27.1, `build/coreml/soma_b1.mlpackage` from the ONNX route)
+## Results so far (M2 Pro, macOS 27, Xcode 27.1, `build/coreml/soma_b1.mlpackage`)
 
 | Compute units | mean \|Δ\| | same length | median ms/call | p90 | placement (MLComputePlan) |
 |---|---|---|---|---|---|
@@ -132,11 +132,23 @@ was using the machine.
 
 These match the Python/coremltools numbers (~9–11 ms, ~0.009). The CPU ops on the NE plan are mostly
 cheap shape/cast ops (1.2 % of estimated cost). The CPU-only accuracy drop is worth a look if CPU fallback
-ever matters. iOS: builds for the simulator; **no device numbers yet.**
+ever matters.
+
+## iPhone 18 Pro (iOS app, Release build, CPU + Neural Engine)
+
+Same batch-1 package as the Mac (the direct route's `soma_b1.mlpackage`, byte-identical), same 84 inputs.
+
+| Device | mean \|Δ\| | same length | median ms/call | p90 | decoded joints vs Python fp32 (mean / max) | placement |
+|---|---|---|---|---|---|---|
+| **iPhone 18 Pro** | 0.0115 | 84/84 | **6.79** | 7.63 | 7.6 mm / 62.6 mm | 1534/2413 ops on NE, 879 CPU; **96.3 % of est. cost on NE** |
+| M2 Pro Mac (`mbbench`, same run day) | 0.0092 | 84/84 | 9.71 | 11.26 | 8.6 mm / 97.7 mm | 1570/2413 ops on NE, 843 CPU; 98.8 % |
+
+The phone's Neural Engine is ~1.4× faster than the M2 Pro's for this model. Its output differs slightly more
+in the network's raw output but is well inside the 0.02 bar, and its decoded joints are as close or closer.
+Load + compile took 0.1 s on a later launch (the first launch specialises the model for the NE).
 
 ## Not done / next steps
 
-- **iPhone numbers** on a real device (steps above).
 - **Rest of NVIDIA's runtime in Swift** (the pose decode is done) would involve:
   - the *controller* (`MotionBricksSOMAEngine` and its controller in `third_party/motionbricks`): building the
     seven inputs each step from the character state, keyframe/root targets and masks, choosing
