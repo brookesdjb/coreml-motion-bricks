@@ -6,7 +6,7 @@ changes. Backends:
 * "CPU_AND_NE" (default), "CPU_AND_GPU", "CPU_ONLY", "ALL": the fp16 CoreML model with those compute units.
   CPU_AND_NE puts ~99% of the work on the Neural Engine and leaves the GPU free.
 * "FP32:<units>", e.g. "FP32:ALL": the fp32 CoreML model (exact against the reference, a little slower).
-* "ort": ONNX Runtime on the CPU, using the batch-1 fp16 ONNX graph.
+* "ort": ONNX Runtime on the CPU, running NVIDIA's published fp16 ONNX model.
 * a callable taking the input feeds dict and returning (motion, tokens): used by cmb.crowd's batcher.
 """
 import os
@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 
 from . import _compat  # noqa: F401  (must precede motionbricks imports)
-from .paths import COMPILED_DIR, STATIC_ONNX, coreml_package, coreml_package_fp32
+from .paths import COMPILED_DIR, SOURCE_ONNX, coreml_package, coreml_package_fp32
 
 import warp as wp  # noqa: E402
 from motionbricks.model.config import MotionBricksInferenceConfig  # noqa: E402
@@ -91,7 +91,7 @@ class MacSOMAEngine(MotionBricksSOMAEngine):
             self._run, self.backend = backend, "external"
         elif backend == "ort":
             import onnxruntime as ort
-            sess = ort.InferenceSession(str(STATIC_ONNX), providers=["CPUExecutionProvider"])
+            sess = ort.InferenceSession(str(SOURCE_ONNX), providers=["CPUExecutionProvider"])
             self._run = lambda feeds: sess.run(["pred_global_motions", "pred_num_tokens"], feeds)
         else:
             package, units = ((coreml_package_fp32(), backend[5:]) if backend.startswith("FP32:")

@@ -12,11 +12,32 @@ replacing: the pose encode/decode is written in NVIDIA Warp, which runs on the C
 sends the network inputs to CoreML or ONNX Runtime. Import-time stubs for TensorRT and the viewer packages are
 in `cmb/_compat.py`.
 
-## 2. Conversion bugs and fixes
+## 2. Conversion route
 
-The route is ONNX → PyTorch (onnx2torch) → `torch.jit.trace` → CoreML ML Program. Every step was validated
-against ONNX Runtime on 84 real network inputs recorded from NVIDIA's runtime (walking, turning, running,
-jumps).
+`cmb/convert.py` converts **NVIDIA's own PyTorch model** (built by their exporter code from the released
+checkpoints, the model their ONNX files are exported from) directly: `make_fx(functionalize(model))` →
+FX rewrites (`cmb/fx_rewrites.py`) → `torch.export` → CoreML ML Program. NVIDIA's code is not modified; two
+shims are applied only while capturing (`t.all` → True for input-validation asserts, `one_hot` as a
+comparison). Every package is checked against NVIDIA's fp32 PyTorch model on 84 real network inputs recorded
+from NVIDIA's runtime (walking, turning, running, jumps) before it is saved. The full investigation, with the
+tools used to find each problem, is in `experiments/direct/RESULTS.md`.
+
+| Problem | Symptom | Fix |
+|---|---|---|
+| One Neural Engine piece fails to compile (`ANECompiler … ZinComputeMutableProgramAddObjects`) | CoreML drops the **whole** program to the CPU, not just that piece | Remove what splits the graph into many NE/CPU pieces, and the patterns the compiler rejects (rows below and in section 3) |
+| `aten._safe_softmax` (PyTorch's MATH attention) decomposes into int `fill_like` and bool `any`/`logical_not` | Every attention layer split into NE / CPU / NE pieces; one of them failed to compile | Float-only `softmax(x) · amax(x > −5e3)`, with −inf mask fills made a finite −1e4 |
+| Scatters: coremltools lowers in-place slice writes to `scatter` on the flattened tensor, and builds one-position scatter masks from int ops it tiles to full size | Large ops on the CPU in the motion-assembly tail (batch 8: 24 → 16 ms per call once fixed) | Full-tensor slice writes are just their source, others a `cat`; one-position scatters a float position mask and a mul/add blend |
+| gathers, `sort`, `*_like` fills | NE compile failures | One-hot select-and-sum; full-length `topk`; constant-shape `full` |
+| coremltools: negative `cumsum` axes, `int`/`bool` casts of one-element constants, scalar scatter values typed int32 | Conversion errors | Positive axes; patched casts; tensor scatter values |
+| Geometry in fp16 | Root-motion decode divides by small numbers: foot sliding | NVIDIA's own precision rule (their `tools/onnx/precision.py`): networks fp16, geometry ops fp32 |
+
+The fp16 packages score 0.009–0.010 mean |Δ| against NVIDIA's fp32 PyTorch, about as close as NVIDIA's own
+fp16 ONNX model (0.006); the fp32 package matches it exactly.
+
+### Earlier route: ONNX → onnx2torch (git tag `onnx-route`)
+
+Until this repo converted the PyTorch model directly, it converted NVIDIA's ONNX file through onnx2torch.
+Bugs found on that route, for anyone still on it:
 
 | Problem | Symptom | Fix |
 |---|---|---|
@@ -24,29 +45,30 @@ jumps).
 | Mixed fp16/fp32 graph | ONNX Runtime CPU silently computes much of it in fp32; PyTorch/CoreML honour the fp16 casts, and the root decode divides by small numbers | Rewrite the graph as pure fp32 before converting (lossless); let CoreML choose fp16 compute itself |
 | Missing / unsupported converters | Conversion errors | ScatterElements, OneHot, LpNormalization converters; drop empty optional inputs; make CumSum axes positive; alias torch op names coremltools lacks (`greater`, `broadcast_to`, `resolve_conj`, …) |
 
-After the fixes, the fp32 CoreML model matches the fp32 reference exactly (mean |Δ| 0.0000); the fp16 models
-are as close as NVIDIA's own fp16 ONNX model (≈0.008–0.011).
+## 3. Neural Engine bugs by batch size
 
-## 3. Neural Engine bugs at batch > 4
+Each batch size above 1 hit its own Neural Engine compiler bug; the GPU was correct throughout. Found by
+cutting the converted program at the MIL level and checking where the Neural Engine departs from fp32 PyTorch,
+or where it loses the Neural Engine (`experiments/direct/mil_window.py diverge` / `bisect`).
 
-Batch 1, 2 and 4 are accurate on the Neural Engine. At batch 8, **identical inputs in every slot gave
-different outputs per slot** (repeating every 4 slots) on the Neural Engine, while the GPU was correct.
-`tools/bisect_batch.py` cuts the graph after a node, converts that prefix, and checks slot agreement, to
-binary-search the first bad operation. Three separate problems:
-
-1. **Scatter** (writing each character's end pose into the trajectory): CoreML's `scatter_along_axis`
-   mixed slots. Rewritten as a compare-and-select mask (`where(arange == index, update, data)`).
-2. **Tiny tensors** (8×1×4 root-conditioning values): two inputs that each matched across slots produced a
-   sum that didn't. Ops on tensors under 256 elements are kept in fp32, which CoreML runs on the CPU.
-3. **Conv1d**: folded into a Conv2d over (1, C, B, L) with a 1-tall kernel, so the Neural Engine sees batch 1.
-   This also doubled the convolutions' speed.
+1. **Batch 2, wrong values.** The token embedding's gather → reshape (B·16, 160) → linear was miscomputed
+   (0.24 mean |Δ|, the same in every slot). Exposing the gather's output made it correct. Fix: the embedding
+   as a one-hot times the table. (This also made batches 1 and 8 slightly more accurate.)
+2. **Batch 4, everything on the CPU.** `nn.MultiheadAttention` flattens its output seq-first, as
+   (T·B, H·D) rows, into the output projection; the compiler rejected that transpose → reshape → linear.
+   Fix: the projection computed batch-first, so its transpose cancels against the one back to batch-first.
+3. **Batch 8, wrong values.** Ops on tiny tensors (the 8×8 `has_*` masks, (8,8,4) root values) were
+   miscomputed. Ops whose largest output has under 128 elements are kept in fp32, which CoreML runs on the
+   CPU (64 still failed). Conv1d is folded into a Conv2d over (1, C, B, L) with a 1-tall kernel, so the
+   Neural Engine sees batch 1; that was the batch-8 speed fix. Both apply above batch 4 only: at batch 1 the
+   small-tensor rule costs accuracy (0.051).
 
 ## 4. Performance (single model calls)
 
 | Backend | ms per generation (batch 1) |
 |---|---|
-| ONNX Runtime, CPU | 27–30 |
-| CoreML, CPU + Neural Engine | **~11** |
+| ONNX Runtime, CPU | 28–30 |
+| CoreML, CPU + Neural Engine | **~10** |
 | CoreML, CPU + GPU | ~13 |
 | CoreML, let CoreML choose | ~14–16 (it puts 86% on the GPU) |
 
@@ -55,10 +77,11 @@ Throughput with calls queued in one batch-API submission:
 
 | Model | characters/s |
 |---|---|
-| batch 1 | ~90 |
-| batch 4 × 8 queued | ~370 |
+| batch 1 | ~110 |
+| batch 1 × 8 queued | ~130 |
+| batch 4 × 8 queued | ~360 |
 | batch 8 × 8 queued | **~700** |
-| batch 16 × 8 queued | ~800 (accurate, but needs 128 requests waiting) |
+| batch 16 × 8 queued | ~800 (measured on the ONNX route; accurate, but needs 128 requests waiting) |
 
 Running Neural Engine and GPU models side by side was *slower* in total than the Neural Engine alone.
 
@@ -79,10 +102,10 @@ generation requests to the Neural Engine together; NPCs are split over worker pr
 |---|---|
 | 1 process, batch 4 | ~45 NPCs |
 | 4 processes, batch 4 | ~185 |
-| 6 processes, batch 8, NVIDIA default settings | ~200 (200 NPCs at 1.01× real time) |
-| **6 processes, batch 8, calm profile** | **~300** (300 NPCs at 1.01× real time) |
+| 6 processes, batch 8, NVIDIA default settings | ~200 (200 NPCs at 1.05× real time) |
+| **6 processes, batch 8, calm profile** | **~300** (300 NPCs at 1.03× real time) |
 
-The **calm crowd profile** (`cmb.crowd.apply_calm_profile`) asks for ~40% fewer clips (0.94 vs 1.56 per NPC
+The **calm crowd profile** (`cmb.crowd.apply_calm_profile`) asks for ~40% fewer clips (0.96–0.98 vs 1.58 per NPC
 per second) at the same foot-slide: longer clips (12–16 tokens), targets placed further ahead, regeneration
 only on ~40° / 50% changes, and NPCs that hold a heading instead of re-aiming every tick.
 

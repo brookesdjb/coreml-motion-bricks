@@ -41,9 +41,9 @@ def hbar(path, title, subtitle, labels, values, unit, fmt="{:.0f}"):
 
 # build/logs/motion_quality.txt: median time per generation, one character
 hbar("generation_time.png", "Time per generation (one character)", "Lower is better. Median over a 9 s walk/turn/stop.",
-     ["ONNX Runtime, CPU", "CoreML, GPU", "CoreML, Neural Engine"], [26.1, 12.8, 9.7], "ms", "{:.1f}")
+     ["ONNX Runtime, CPU", "CoreML, GPU", "CoreML, Neural Engine"], [29.9, 13.2, 10.2], "ms", "{:.1f}")
 # build/logs/bench_ne.txt: batch-B model, 8 calls queued per batch-API submission
 hbar("ne_throughput.png", "Neural Engine throughput by batch size",
      "Characters generated per second, 8 calls queued per submission. Higher is better.",
-     ["batch 1", "batch 2", "batch 4", "batch 8"], [132, 239, 352, 692], "/s")
+     ["batch 1", "batch 2", "batch 4", "batch 8"], [132, 231, 364, 702], "/s")
 print("charts written to", OUT)

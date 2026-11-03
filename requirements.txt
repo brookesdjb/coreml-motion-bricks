@@ -1,13 +1,12 @@
 # Tested on macOS 26 / Apple M2 Pro with Python 3.12.9. Versions are pinned because the conversion relies on
-# converter internals (onnx2torch registry, coremltools op registry) that change between releases.
+# converter internals (torch FX/export graphs, the coremltools op registry) that change between releases.
 numpy==2.5.4
 scipy==1.18.1
 warp-lang==1.19.0
 usd-core==26.3
-onnx==1.23.2
-onnxruntime==1.31.1
-onnxsim==0.8.1
-onnx2torch==1.5.15
+onnxruntime==1.31.1   # the "ort" reference backend (NVIDIA's published ONNX model) only
+huggingface_hub==2.4.0   # NVIDIA's checkpoints, for the conversion
+safetensors==0.8.0
 torch==2.7.0
 torchvision==0.22.0
 coremltools==9.0
